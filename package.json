@@ -19,6 +19,7 @@
     "program analysis"
   ],
   "files": [
+    "src",
     "lib",
     "bin",
     "resources"
