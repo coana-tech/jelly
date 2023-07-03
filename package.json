@@ -22,7 +22,10 @@
     "src",
     "lib",
     "bin",
-    "resources"
+    "resources",
+    "tsconfig.json",
+    "tsconfig-build.json",
+    "package-lock.json"
   ],
   "bin": {
     "jelly": "lib/main.js",
