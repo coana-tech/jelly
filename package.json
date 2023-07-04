@@ -42,7 +42,8 @@
     "pkg": "npm run clean; npm run build; pkg lib/main.js -C Brotli --options \"expose-gc,max-old-space-size=8192\" -c package.json -o dist/jelly; pkg lib/server.js -C Brotli --options \"expose-gc,max-old-space-size=8192\" -c package.json -o dist/jelly-server",
     "clean": "rm -rf lib dist tmp/tsbuildinfo tmp/coverage tests/node_modules/jelly-previous",
     "build-docker": "npm run build && docker build -t jelly .",
-    "jelly-docker": "./bin/jelly-docker"
+    "jelly-docker": "./bin/jelly-docker",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@babel/core": "^7.21.3",
