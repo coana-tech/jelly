@@ -19,13 +19,9 @@
     "program analysis"
   ],
   "files": [
-    "src",
     "lib",
     "bin",
-    "resources",
-    "tsconfig.json",
-    "tsconfig-build.json",
-    "package-lock.json"
+    "resources"
   ],
   "bin": {
     "jelly": "lib/main.js",
