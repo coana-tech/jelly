@@ -6,12 +6,10 @@ import {
     isAssignmentPattern,
     isExportDeclaration,
     isExpression,
-    isFunctionExpression,
     isIdentifier,
     isImport,
     isLVal,
     isMemberExpression,
-    isNewExpression,
     isObjectPattern,
     isOptionalMemberExpression,
     isParenthesizedExpression,
@@ -23,13 +21,18 @@ import {
     JSXMemberExpression,
     JSXNamespacedName,
     LVal,
-    NewExpression,
     Node,
-    OptionalCallExpression,
     ParenthesizedExpression
 } from "@babel/types";
 import {NodePath} from "@babel/traverse";
-import {getKey, getProperty, isMaybeUsedAsPromise, isParentExpressionStatement} from "../misc/asthelpers";
+import {
+    getAdjustedCallNodePath,
+    getKey,
+    getProperty,
+    isInTryBlockOrBranch,
+    isMaybeUsedAsPromise,
+    isParentExpressionStatement
+} from "../misc/asthelpers";
 import {
     AccessPathToken,
     AllocationSiteToken,
@@ -69,7 +72,7 @@ import {
     REGEXP_PROTOTYPE,
     SET_VALUES
 } from "../natives/ecmascript";
-import {SpecialNativeObjects} from "../natives/nativebuilder";
+import {CallNodePath, SpecialNativeObjects} from "../natives/nativebuilder";
 import {TokenListener} from "./listeners";
 import micromatch from "micromatch";
 import {callPromiseResolve} from "../natives/nativehelpers";
@@ -142,16 +145,11 @@ export class Operations {
      * @param path path of the call expression
      */
     callFunction(calleeVar: ConstraintVar | undefined, baseVar: ConstraintVar | undefined, args: CallExpression["arguments"],
-                 resultVar: ConstraintVar | undefined, isNew: boolean, path: NodePath<CallExpression | OptionalCallExpression | NewExpression>) {
+                 resultVar: ConstraintVar | undefined, isNew: boolean, path: CallNodePath) {
         const f = this.solver.fragmentState; // (don't use in callbacks)
         const caller = this.a.getEnclosingFunctionOrModule(path, this.moduleInfo);
 
-        // workaround to match dyn.ts which has wrong source location for calls in certain parenthesized expressions
-        const pars: NodePath = isParenthesizedExpression(path.parentPath.node) &&
-            (isNewExpression(path.node) ||
-             (!isParenthesizedExpression(path.node.callee) && !isFunctionExpression(path.node.callee))) ?
-            path.parentPath : path;
-
+        const pars = getAdjustedCallNodePath(path);
         f.registerCall(pars.node, this.moduleInfo);
 
         // collect special information for pattern matcher
@@ -375,9 +373,8 @@ export class Operations {
                         this.solver.addSubsetConstraint(this.solver.varProducer.arrayValueVar(t), dst);
 
                         // constraint: ...: ⟦t.p⟧ ⊆ ⟦E[i]⟧ where p is a property of t
-                        this.solver.addForAllArrayEntriesConstraint(t, TokenListener.READ_PROPERTY_BASE_DYNAMIC_ARRAY, node, (prop: string) => {
-                            this.solver.addSubsetConstraint(this.solver.varProducer.objPropVar(t, prop), dst);
-                        });
+                        this.solver.addForAllArrayEntriesConstraint(t, TokenListener.READ_PROPERTY_BASE_DYNAMIC_ARRAY, node, (prop: string) =>
+                            this.solver.addSubsetConstraint(this.solver.varProducer.objPropVar(t, prop), dst));
                         // TODO: ignoring reads from prototype chain
 
                     } else { // TODO: assuming dynamic reads from arrays only read array indices
@@ -436,8 +433,11 @@ export class Operations {
                 if (options.ignoreUnresolved || options.ignoreDependencies) {
                     if (logger.isVerboseEnabled())
                         logger.verbose(`Ignoring unresolved module '${str}' at ${locationToStringWithFile(path.node.loc)}`);
-                } else // TODO: special warning if the require/import is placed in a try-block, an if statement, or a switch case?
-                    f.warn(`Unable to resolve module '${str}'`, path.node);
+                } else
+                    if (isInTryBlockOrBranch(path))
+                        f.warn(`Unable to resolve conditionally loaded module '${str}'`, path.node);
+                    else
+                        f.error(`Unable to resolve module '${str}'`, path.node);
 
                 // couldn't find module file (probably hasn't been installed), use a DummyModuleInfo if absolute module name
                 if (!"./#".includes(str[0]))
@@ -652,9 +652,8 @@ export class Operations {
                 switch (t.kind) {
                     case "Array":
                         this.solver.addSubsetConstraint(vp.arrayValueVar(t), dst);
-                        this.solver.addForAllArrayEntriesConstraint(t, TokenListener.READ_ITERATOR_VALUE_ARRAY, node, (prop: string) => {
-                            this.solver.addSubsetConstraint(this.solver.varProducer.objPropVar(t, prop), dst);
-                        });
+                        this.solver.addForAllArrayEntriesConstraint(t, TokenListener.READ_ITERATOR_VALUE_ARRAY, node, (prop: string) =>
+                            this.solver.addSubsetConstraint(this.solver.varProducer.objPropVar(t, prop), dst));
                         break;
                     case "Set":
                         this.solver.addSubsetConstraint(vp.objPropVar(t, SET_VALUES), dst);

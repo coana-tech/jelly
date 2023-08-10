@@ -128,7 +128,9 @@ export function mapGetSet<K, V>(m: Map<K, Set<V>>, k: K): Set<V> {
     return mt;
 }
 
-export function mapGetArray<K, V>(m: Map<K, Array<V>>, k: K): Array<V> {
+export function mapGetArray<K, V>(m: Map<K, Array<V>>, k: K): Array<V>
+export function mapGetArray<K extends object, V>(m: WeakMap<K, Array<V>>, k: K): Array<V>
+export function mapGetArray<K, V>(m: Map<K, Array<V>> | WeakMap<any, Array<V>>, k: K): Array<V> {
     let mt = m.get(k);
     if (!mt) {
         mt = [];
@@ -193,7 +195,9 @@ export function setAll<K, V>(from: Map<K, V>, to: Map<K, V>) {
         to.set(k, v);
 }
 
-export function mapArrayAdd<K, V>(k: K, v: V, m: Map<K, Array<V>>) {
+export function mapArrayAdd<K, V>(k: K, v: V, m: Map<K, Array<V>>): void
+export function mapArrayAdd<K extends object, V>(k: K, v: V, m: WeakMap<K, Array<V>>): void
+export function mapArrayAdd<K, V>(k: K, v: V, m: Map<K, Array<V>> | WeakMap<any, Array<V>>) {
     let a = m.get(k);
     if (!a) {
         a = [];
@@ -312,5 +316,28 @@ export class SourceLocationsToJSON {
         assert(loc && ("module" in loc && loc.module || "filename" in loc && loc.filename)); // TODO: assertion may fail?
         // @ts-ignore
         return `${this.getFileIndex(loc.module ? loc.module.getPath() : loc.filename)}:${loc.start.line}:${loc.start.column + 1}:${loc.end.line}:${loc.end.column + 1}`;
+    }
+
+    parseLocationJSON(loc: LocationJSON): { loc?: SourceLocation, fileIndex: number, file: string } {
+        const [_, _fileIndex, startLine, startCol, endLine, endCol] = /^(\d+):(\d+|\?):(\d+|\?):(\d+|\?):(\d+|\?)/.exec(loc)!;
+        const fileIndex = Number(_fileIndex);
+        assert(fileIndex < this.files.length);
+
+        if (startLine === "?") {
+            assert(startCol === "?" && endLine === "?" && endCol === "?");
+            return {
+                fileIndex,
+                file: this.files[fileIndex],
+            };
+        }
+
+        return {
+            loc: {
+                start: { line: Number(startLine), column: Number(startCol)-1 },
+                end: { line: Number(endLine), column: Number(endCol)-1 },
+            },
+            fileIndex,
+            file: this.files[fileIndex],
+        };
     }
 }

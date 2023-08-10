@@ -14,10 +14,12 @@ import {
     isClassPrivateProperty,
     isExpression,
     isExpressionStatement,
+    isFunctionExpression,
     isIdentifier,
     isImportSpecifier,
     isJSXMemberExpression,
     isMemberExpression,
+    isNewExpression,
     isNumericLiteral,
     isOptionalMemberExpression,
     isParenthesizedExpression,
@@ -115,6 +117,18 @@ export function getClass(path: NodePath<any>): Class | undefined {
 }
 
 /**
+ * Returns an adjusted call node path that matches source locations reported
+ * for calls by the dynamic analysis, which has wrong source locations for calls
+ * in certain parenthesized expressions.
+ */
+export function getAdjustedCallNodePath(path: CallNodePath): NodePath {
+    return isParenthesizedExpression(path.parentPath.node) &&
+        (isNewExpression(path.node) ||
+         (!isParenthesizedExpression(path.node.callee) && !isFunctionExpression(path.node.callee))) ?
+         path.parentPath : path;
+}
+
+/**
  * Returns true if the given node may be used as a Promise.
  * If the node is a callee in a call node or the receiver in a property read that is not 'then' or 'catch',
  * then false is returned, and otherwise true.
@@ -128,4 +142,21 @@ export function isMaybeUsedAsPromise(path: NodePath<CallExpression | OptionalCal
         !(isMemberExpression(path.parent) &&
             isIdentifier(path.parent.property) &&
             !['then', 'catch'].includes(path.parent.property.name));
+}
+
+/**
+ * Returns true if the given node occurs in a try block or branch.
+ */
+export function isInTryBlockOrBranch(path: NodePath): boolean {
+    let p: NodePath | null = path;
+    do {
+        p = p.parentPath;
+        if (p) {
+            if (p.isFunction())
+                return false;
+            if (p.isTryStatement() || p.isIfStatement() || p.isSwitchCase() || p.isConditionalExpression())
+                return true;
+        }
+    } while (p);
+    return false;
 }

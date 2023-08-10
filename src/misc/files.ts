@@ -53,6 +53,8 @@ function* expandRec(path: string, sub: boolean): Generator<string> {
                     return (lstatSync(f1).isDirectory() ? 1 : 0) - (lstatSync(f2).isDirectory() ? 1 : 0) || f1.localeCompare(f2);
                 }))
                     yield* expandRec(file, true);
+            else
+                logger.debug(`Skipping directory ${path}`);
         } else
             logger.debug(`Skipping directory ${path}`);
     } else if (stat.isFile() && !path.endsWith(".d.ts") &&
@@ -119,7 +121,7 @@ export function requireResolve(str: string, file: FilePath, node: Node, f: Fragm
         if (!filepath)
             throw e;
     }
-    if (!filepath.startsWith(options.basedir)) {
+    if (!filepath.startsWith(dirname(options.basedir))) {
         const msg = `Found module at ${filepath}, but not in basedir`;
         logger.debug(msg);
         throw new Error(msg);
@@ -136,9 +138,8 @@ export function requireResolve(str: string, file: FilePath, node: Node, f: Fragm
 
 /**
  * Attempts to auto-detect basedir if not set explicitly.
- * If not set explicitly and a single path is given, basedir is set to
- * the parent of the nearest enclosing directory of paths[0] that
- * contains a package.json file.
+ * If not set explicitly and a single path is given, basedir is set to the nearest enclosing directory
+ * of paths[0] that contains a package.json file.
  * @param paths paths to entry files or directories
  * @return true if successful, false if failed
  */
@@ -162,7 +163,7 @@ export function autoDetectBaseDir(paths: Array<string>): boolean {
         logger.info("Can't auto-detect basedir, package.json not found (use option -b), aborting");
         return false;
     }
-    options.basedir = dirname(resolve(process.cwd(), t.dir));
+    options.basedir = resolve(process.cwd(), t.dir);
     logger.verbose(`Basedir auto-detected: ${options.basedir}`);
     return true;
 }

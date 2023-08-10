@@ -1,4 +1,4 @@
-import fs from "fs";
+import fs, {statSync} from "fs";
 import {resolve} from "path";
 import logger, {writeStdOutIfActive} from "../misc/logger";
 import Solver, {AbortedException} from "./solver";
@@ -60,7 +60,6 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
 
                 const str = fs.readFileSync(file, "utf8"); // TODO: OK to assume utf8? (ECMAScript says utf16??)
                 writeStdOutIfActive(`Parsing ${file} (${Math.ceil(str.length / 1024)}KB)...`);
-                solver.diagnostics.codeSize += str.length;
                 const ast = parseAndDesugar(str, file, solver.fragmentState);
                 if (!ast) {
                     a.filesWithParseErrors.push(file);
@@ -68,6 +67,7 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
                 }
                 moduleInfo.node = ast.program;
                 a.filesAnalyzed.push(file);
+                solver.diagnostics.codeSize += statSync(file).size;
 
                 if (options.modulesOnly) {
 
@@ -285,7 +285,7 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
                 logger.info(`Iterations: ${solver.diagnostics.iterations}, listener notification rounds: ${solver.listenerNotificationRounds}`);
                 if (options.maxRounds !== undefined)
                     logger.info(`Fixpoint round limit reached: ${solver.roundLimitReached} time${solver.roundLimitReached !== 1 ? "s" : ""}`);
-                logger.info(`Constraint vars: ${f.getNumberOfVarsWithTokens()} (${f.vars.size}), tokens: ${f.numberOfTokens}, subset edges: ${f.numberOfSubsetEdges}, max tokens: ${solver.largestTokenSetSize}, max subset out: ${solver.largestSubsetEdgeOutDegree}`);
+                logger.info(`Constraint vars: ${f.getNumberOfVarsWithTokens()} (${f.vars.size}), tokens: ${f.numberOfTokens}, subset edges: ${f.numberOfSubsetEdges}, max tokens: ${f.getLargestTokenSetSize()}, max subset out: ${f.getLargestSubsetEdgeOutDegree()}`);
                 logger.info(`Listeners (notifications) normal: ${mapMapSize(f.tokenListeners)} (${solver.tokenListenerNotifications}), ` +
                     `pair: ${mapMapSize(f.pairListeners1) + mapMapSize(f.pairListeners2)} (${solver.pairListenerNotifications}), ` +
                     `neighbor: ${mapMapSize(f.packageNeighborListeners)} (${solver.packageNeighborListenerNotifications}), ` +

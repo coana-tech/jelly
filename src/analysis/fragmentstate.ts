@@ -29,7 +29,7 @@ import {NodePath} from "@babel/traverse";
 import {GlobalState} from "./globalstate";
 import {ConstraintVarProducer} from "./constraintvarproducer";
 
-export type ListenerID = number;
+export type ListenerID = bigint;
 
 /**
  * Analysis state for a fragment (a module or a package with dependencies, depending on the analysis phase).
@@ -623,6 +623,30 @@ export class FragmentState {
      */
     getNumberOfVarsWithTokens() {
         return this.tokens.size;
+    }
+
+    /**
+     * Returns the maximum number of tokens of all constraint variables.
+     */
+    getLargestTokenSetSize(): number {
+        let c = 0;
+        for (const v of this.tokens.values()) {
+            const s = v instanceof Token ? 1 : v.size;
+            if (s > c)
+                c = s;
+        }
+        return c;
+    }
+
+    /**
+     * Returns the maximum number of outgoing subset edges of all constraint variables.
+     */
+    getLargestSubsetEdgeOutDegree(): number {
+        let c = 0;
+        for (const vs of this.subsetEdges.values())
+            if (vs.size > c)
+                c = vs.size;
+        return c;
     }
 
     /**

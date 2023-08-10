@@ -1,22 +1,15 @@
 /*! DO NOT INSTRUMENT */
 
 /**
- * Packages that are typically used for tests only and should be excluded in the collected call graphs.
- */
-const TEST_PACKAGES = [
-    "ava", "yarn", "mocha", "chai", "nyc",
-    "sinon", "should", "@babel", "jest", "tap", "tape",
-]; // TODO: other test packages?
-
-/**
  * Commands that do not need instrumentation, for example because the actual work is known to happen in child processes.
  */
 const IGNORED_COMMANDS = [
     "npm", "npm-cli.js",
     "grunt", "rollup", "browserify", "webpack", "terser",
     "rimraf",
-    "eslint", "tslint", "jslint", "prettier", "xo", "standard",
+    "eslint", "tslint", "jslint", "jshint", "stylelint", "prettier", "xo", "standard",
     "tsc", "tsd",
+    "nyc",
     // TODO: other commands where instrumentation can be skipped?
 ];
 
@@ -63,6 +56,8 @@ if (!outfile) {
 }
 
 import {IID, Jalangi, SourceObject} from "../typings/jalangi";
+import {mapArrayAdd} from "../misc/util";
+import {isPathInTestPackage} from "./sources";
 import fs from "fs";
 import path from "path";
 
@@ -83,9 +78,14 @@ enum FunType {
 
 interface FunInfo {
     type: FunType,
+    // true if function is defined in an eval context
     eval: boolean,
+    // call edges to other functions
     calls?: Set<IID>,
     loc: SourceObject,
+    // true if the functions should be present in the output
+    // currently this is the case for functions entered in app-level code
+    output: boolean,
 }
 
 declare const J$: Jalangi;
@@ -109,10 +109,10 @@ const iidToInfo = new Map<IID, FunInfo>();
 
 // TODO: add edges for implicit calls? calls to/from built-ins? to/from Node.js std.lib? calls to/from eval/Function? async/await?
 /**
- * Adds a call edge.
+ * Adds a call edge to a resolved callee.
  */
-function addCallEdge(call: IID | null, callerFun: FunInfo, calleeFun: IID) {
-    (callerFun.calls ??= new Set()).add(calleeFun);
+function addCallEdge(call: IID, callerInfo: FunInfo, callee: IID) {
+    (callerInfo.calls ??= new Set()).add(callee);
 
     if (call) { // excluding call->function edges for implicit calls
         let cs = call2fun.get(call);
@@ -121,7 +121,29 @@ function addCallEdge(call: IID | null, callerFun: FunInfo, calleeFun: IID) {
             call2fun.set(call, cs);
             callLocations.set(call, so2loc(J$.iidToSourceObject(call)));
         }
-        cs.add(calleeFun);
+        cs.add(callee);
+    }
+}
+
+/**
+ * Tries to resolve the callee function to an IID and adds a call edge.
+ * If the IID cannot be retrieved, a pending call to be resolved later is registered instead.
+ */
+function registerCall(call: IID, callerInfo: FunInfo, callee: Function) {
+    // resolve bound functions
+    let bound: Function | undefined;
+    while ((bound = binds.get(callee)) !== undefined)
+        callee = bound;
+
+    const calleeIid = funIids.get(callee);
+    if (calleeIid === undefined)
+        // we have not entered the function yet - register pending call
+        mapArrayAdd(callee, [callerInfo, call], pendingCalls);
+    else {
+        // every iid in funIids must map to something in iidToInfo
+        const calleeInfo = iidToInfo.get(calleeIid)!;
+        if (calleeInfo.type !== FunType.Test && !calleeInfo.eval)
+            addCallEdge(call, callerInfo, calleeIid);
     }
 }
 
@@ -139,6 +161,26 @@ function so2loc(s: SourceObject): string {
 }
 
 /**
+ * Converts paths to source files to the appropriate function type.
+ * Memoized.
+ */
+const pathToFunType: (path: string) => FunType = (() => {
+    const cache = new Map<string, FunType>();
+    return (path: string): FunType => {
+        let typ = cache.get(path);
+        if (typ !== undefined)
+            return typ;
+
+        typ = path === "<builtin>"? FunType.Lib :
+            path.startsWith("/") || path.includes("node_modules/")?
+            (isPathInTestPackage(path)? FunType.Test : FunType.Lib)
+            : FunType.App;
+        cache.set(path, typ);
+        return typ;
+    };
+})();
+
+/**
  * NodeProf instrumentation callbacks.
  */
 J$.addAnalysis({ // TODO: super calls not detected (see tests/micro/classes.js)
@@ -153,27 +195,8 @@ J$.addAnalysis({ // TODO: super calls not detected (see tests/micro/classes.js)
         if (callerInApp && typeof f === "function") {
             const callerIid = funLocStack[funLocStack.length - 1]!
             const callerInfo = iidToInfo.get(callerIid)!;
-            if (!callerInfo.eval) {
-                // resolve bound functions
-                let bound: Function | undefined;
-                while((bound = binds.get(f)) !== undefined)
-                    f = bound;
-
-                const calleeIid = funIids.get(f);
-                if (calleeIid === undefined) {
-                    // we have not entered the function yet - register pending call
-                    let m = pendingCalls.get(f);
-                    if (m === undefined)
-                        pendingCalls.set(f, m = []);
-
-                    m.push([callerInfo, iid]);
-                } else {
-                    // every iid in funIids must map to something in iidToInfo
-                    const calleeInfo = iidToInfo.get(calleeIid)!;
-                    if (calleeInfo.type !== FunType.Test && !calleeInfo.eval)
-                        addCallEdge(iid, callerInfo, calleeIid);
-                }
-            }
+            if (!callerInfo.eval)
+                registerCall(iid, callerInfo, f);
         }
     },
 
@@ -189,30 +212,28 @@ J$.addAnalysis({ // TODO: super calls not detected (see tests/micro/classes.js)
             const so = J$.iidToSourceObject(iid);
 
             info = {
-                type: TEST_PACKAGES.some((w) => so.name.includes(`node_modules/${w}/`))?
-                    FunType.Test :
-                    so.name.startsWith("/") || so.name.includes("node_modules/")?
-                    FunType.Lib : FunType.App,
+                type: pathToFunType(so.name),
                 eval: "eval" in so,
                 loc: enterScriptLocation ?? so,
+                output: false,
             };
 
             iidToInfo.set(iid, info);
         }
 
         // determine whether the caller and/or the callee are in app code or in test packages
-        let callerInApp, calleeInApp;
-        if (inAppStack.length === 0) { // called from top-level
+        let calleeInApp;
+        if (inAppStack.length === 0) // called from top-level
             calleeInApp = info.type === FunType.App && !info.eval;
-            callerInApp = false;
-        } else {
-            callerInApp = inAppStack[inAppStack.length - 1];
+        else {
+            const callerInApp = inAppStack[inAppStack.length - 1];
             if (callerInApp) // called from app code
                 calleeInApp = info.type !== FunType.Test;
             else // called from test package
                 calleeInApp = info.type === FunType.App;
         }
         inAppStack.push(calleeInApp);
+        info.output ||= calleeInApp && !info.eval;
 
         const pCalls = pendingCalls.get(func);
         if (pCalls !== undefined) {
@@ -287,10 +308,29 @@ J$.addAnalysis({ // TODO: super calls not detected (see tests/micro/classes.js)
      * Before call to built-in function.
      */
     builtinEnter(name: string, f: Function, dis: any, args: any) {
-        // (J$ as any).nativeLog(`BuiltinEnter ${name} ${dis} ${typeof dis}`);
-        pendingCalls.delete(f); // remove pending calls
-        // TODO: Populate funIids and iidToInfo with something to prevent pending calls?
-        // TODO: record extra information about calls to built-ins? see --callgraph-native-calls and --callgraph-require-calls
+        // (J$ as any).nativeLog(`BuiltinEnter ${name} ${typeof dis}`);
+
+        const pCalls = pendingCalls.get(f);
+        if (pCalls !== undefined) {
+            // TODO: Populate funIids and iidToInfo with something to prevent pending calls?
+            pendingCalls.delete(f);
+
+            switch (name) {
+                case "Function.prototype.call":
+                case "Function.prototype.apply": {
+                    if (typeof dis === "function") {
+                        if (pCalls.length === 1) { // common case
+                            const [callerInfo, iid] = pCalls[0];
+                            registerCall(iid, callerInfo, dis);
+                        } else
+                            for (const [callerInfo, iid] of pCalls)
+                                registerCall(iid, callerInfo, dis);
+                    }
+                }
+
+                // TODO: record extra information about calls to other built-ins? see --no-callgraph-native and --no-callgraph-require
+            }
+        }
     },
 
     builtinExit(name: string, f: Function, dis: any, args: any, returnVal: any, exceptionVal: any) {
@@ -367,38 +407,35 @@ J$.addAnalysis({ // TODO: super calls not detected (see tests/micro/classes.js)
  * (Note, funLocStack is nonempty if exit happens because of process.exit.)
  */
 process.on('exit', function() {
-    if (files.length === 0) {
-        log(`jelly: No relevant files detected for process ${process.pid}, skipping file write`);
+    const outputFunctions = [];
+    for (const [iid, info] of iidToInfo) if (info.output)
+        outputFunctions.push([iid, so2loc(info.loc)]);
+
+    if (outputFunctions.length === 0) {
+        log(`jelly: No relevant functions detected for process ${process.pid}, skipping file write`);
         return;
     }
 
     // log(`jelly: Writing ${outfile}`);
 
-    // the function locations that are required are for those functions
-    // that have calls or are called
-    const requiredFunctions = new Set([...iidToInfo.entries()]
-                                      .flatMap(([i, f]) => f.calls === undefined? [] :
-                                               [i].concat([...f.calls])));
-
     const fd = fs.openSync(outfile, "w");
     fs.writeSync(fd, `{\n "entries": [${JSON.stringify(path.relative(cwd, process.argv[1]))}],\n`);
     fs.writeSync(fd, ` "time": "${new Date().toUTCString()}",\n`);
-    fs.writeSync(fd, ` "functions": {`);
+    fs.writeSync(fd, ` "files": [`);
     let first = true;
-    for (const [iid, info] of iidToInfo) if (requiredFunctions.has(iid)) {
-        fs.writeSync(fd, `${first ? "" : ","}\n  "${iid}": ${JSON.stringify(so2loc(info.loc))}`);
-        first = false;
-    }
-    fs.writeSync(fd, `\n },\n "files": [`);
-    // files go after functions as so2loc populates files
-    first = true;
     for (const file of files) {
         // relativize absolute paths with file:// prefix
         const fp = file.startsWith("file://")? path.relative(cwd, file.substring("file://".length)) : file;
         fs.writeSync(fd, `${first ? "" : ","}\n  ${JSON.stringify(fp)}`);
         first = false;
     }
-    fs.writeSync(fd, `\n ],\n "calls": {`);
+    fs.writeSync(fd, `\n ],\n "functions": {`);
+    first = true;
+    for (const [iid, loc] of outputFunctions) {
+        fs.writeSync(fd, `${first ? "" : ","}\n  "${iid}": ${JSON.stringify(loc)}`);
+        first = false;
+    }
+    fs.writeSync(fd, `\n },\n "calls": {`);
     first = true;
     for (const [iid, loc] of callLocations) {
         fs.writeSync(fd, `${first ? "" : ","}\n  "${iid}": ${JSON.stringify(loc)}`);

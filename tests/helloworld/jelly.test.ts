@@ -15,9 +15,11 @@ test("tests/helloworld/app", async () => {
         moduleInfos: 94,
         numberOfFunctionToFunctionEdges: 1398,
         oneCalleeCalls: 905,
-        funFound: 181,
-        funTotal: 200,
-        callFound: 247,
-        callTotal: 267
+        funFound: 129,
+        funTotal: 138,
+        callFound: 194,
+        callTotal: 204,
+        reachableFound: 122,
+        reachableTotal: 189
     });
 }, 20000);
