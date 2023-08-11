@@ -42,6 +42,7 @@ export type RequestCommands =
     "htmlcallgraph" |
     "htmldataflowgraph" |
     "reachablepackages" |
+    "reachablevulnapis" |
     "typescript" |
     "tslibraryusage" |
     "apiusage" |
@@ -222,6 +223,14 @@ export interface ReachablePackagesResponse extends SuccessResponse {
         name: string;
         version?: string;
     }>;
+}
+
+export interface ReachableVulnAPIsRequest extends Request {
+    command: "reachablevulnapis";
+}
+
+export interface ReachableVulnAPIsResponse extends SuccessResponse {
+    body: { [vulnId: string]: string[]} // the strings are source locations of format file:lineStart:colStart:lineEnd:colEnd
 }
 
 /**
