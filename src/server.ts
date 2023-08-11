@@ -191,6 +191,10 @@ async function main() {
                 logger.info(`Loading vulnerability patterns from ${options.vulnerabilities}`);
                 vulnerabilityDetector = new VulnerabilityDetector(JSON.parse(readFileSync(options.vulnerabilities, "utf8")) as Array<Vulnerability>); // TODO: use when setting globs and props? (see also main.ts)
             }
+            if (options.vulnerabilitiesJSON) {
+                logger.info(`Parsing vulnerability patterns`);
+                vulnerabilityDetector = new VulnerabilityDetector(JSON.parse(options.vulnerabilitiesJSON) as Array<Vulnerability>);
+            }
             logger.info("Options set");
             return prepareResponse(true, req);
         },
@@ -351,7 +355,7 @@ async function main() {
             if (!options.callgraphHtml)
                 return prepareResponse(false, req, {message: "Option callgraphHtml not set"});
             let vr: VulnerabilityResults = {};
-            if (vulnerabilityDetector && options.vulnerabilities) {
+            if (vulnerabilityDetector && (options.vulnerabilities || options.vulnerabilitiesJSON)) {
                 const f = solver.fragmentState;
                 vr.package = vulnerabilityDetector.findPackagesThatMayDependOnVulnerablePackages(f);
                 vr.module = vulnerabilityDetector.findModulesThatMayDependOnVulnerableModules(f);
@@ -398,7 +402,7 @@ async function main() {
         },
 
         reachablevulnapis: async (req: ReachableVulnAPIsRequest) => {
-            if (!vulnerabilityDetector || !options.vulnerabilities) return prepareResponse(false, req, {message: "options.vulnerabilities has not been set"});
+            if (!vulnerabilityDetector || !(options.vulnerabilities || options.vulnerabilitiesJSON)) return prepareResponse(false, req, {message: "Neither options.vulnerabilities and options.vulnerabilitiesJSON have not been set"});
             if (!solver || !files)
                 return prepareResponse(false, req, {message: "Analysis results not available"});
             const matches = vulnerabilityDetector.patternMatch(solver.fragmentState, typer, solver.diagnostics)

@@ -62,6 +62,7 @@ export const options: {
     zeros: boolean,
     variableKinds: boolean,
     vulnerabilities: string | undefined,
+    vulnerabilitiesJSON: string | undefined,
     externalMatches: boolean,
     includePackages: Array<string> | undefined,
     excludePackages: Array<string> | undefined
@@ -119,6 +120,7 @@ export const options: {
     zeros: false,
     variableKinds: false,
     vulnerabilities: undefined,
+    vulnerabilitiesJSON: undefined,
     externalMatches: false,
     includePackages: undefined,
     excludePackages: undefined
