@@ -126,7 +126,7 @@ export class GlobalState {
     dynamicAnalysisTime: number = 0;
 
     /**
-     * Vulnerability information, only used if options.vulnerabilities is set.
+     * Vulnerability information, only used if options.vulnerabilities or options.vulnerabilitiesJSON is set.
      */
     vulnerabilities: VulnerabilityDetector | undefined; // TODO: move to FragmentState?
 

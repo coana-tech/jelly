@@ -448,7 +448,7 @@ export class Operations {
 
                 // add access path token
                 const analyzed = m instanceof ModuleInfo && (!options.ignoreDependencies || this.a.entryFiles.has(m.getPath()));
-                if (!analyzed || options.vulnerabilities) {
+                if (!analyzed || options.vulnerabilities || options.vulnerabilitiesJSON) {
                     const s = normalizeModuleName(str);
                     const tracked = options.trackedModules && options.trackedModules.find(e =>
                         micromatch.isMatch(m!.getOfficialName(), e) || micromatch.isMatch(s, e))

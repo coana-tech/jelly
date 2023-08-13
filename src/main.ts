@@ -249,9 +249,9 @@ async function main() {
                 globs = getGlobs(patterns);
                 props = getProperties(patterns);
             }
-            if (options.vulnerabilities) {
+            if (options.vulnerabilities || options.vulnerabilitiesJSON) {
                 logger.info(`Loading vulnerability patterns from ${options.vulnerabilities}`);
-                vulnerabilityDetector = new VulnerabilityDetector(JSON.parse(readFileSync(options.vulnerabilities, "utf8")) as Array<Vulnerability>); // TODO: use when setting globs and props? (see also server.ts)
+                vulnerabilityDetector = new VulnerabilityDetector(JSON.parse(options.vulnerabilities ? readFileSync(options.vulnerabilities, "utf8") : options.vulnerabilitiesJSON!) as Array<Vulnerability>); // TODO: use when setting globs and props? (see also server.ts)
                 const ps = vulnerabilityDetector.getPatterns();
                 addAll(getGlobs(ps), (globs = (globs ?? new Set<string>())));
                 addAll(getProperties(ps), (props = (props ?? new Set<string>())));
