@@ -1,10 +1,10 @@
-import {AuditVulnerability, OpenSourceVulnerability} from "./osv";
+import {NpmAuditVulnerability, OpenSourceVulnerability} from "./osv";
 
 /**
  * OSV entry, optionally augmented by code location or access path.
  */
 export interface Vulnerability {
-    osv: OpenSourceVulnerability | AuditVulnerability;
+    osv: OpenSourceVulnerability | NpmAuditVulnerability;
     location?: {
         link?: string;
         file: string;

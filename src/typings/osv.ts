@@ -23,7 +23,7 @@ export interface OpenSourceVulnerability {
 /**
  * The type of the vulnerability as reported by npm audit
  */
-export type AuditVulnerability = {
+export type NpmAuditVulnerability = {
     cvss: {
         score: number;
         vectorString: string | null;
