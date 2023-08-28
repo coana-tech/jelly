@@ -1,6 +1,7 @@
 import {options, resetOptions} from "../../src/options";
 import logger from "../../src/misc/logger";
 import {runTest} from "../../src/testing/runtest";
+import {Vulnerability} from "../../src/typings/vulnerabilities";
 
 beforeEach(() => {
     resetOptions();
@@ -335,9 +336,9 @@ test("tests/micro/low", async () => {
     })
 });
 
-test("tests/micro/Function.prototype.bind", async () => {
-    await runTest("tests/micro", "Function.prototype.bind.js", {
-        soundness: "tests/micro/Function.prototype.bind.json",
+test("tests/micro/bind", async () => {
+    await runTest("tests/micro", "bind.js", {
+        soundness: "tests/micro/bind.json",
         funFound: 1,
         funTotal: 1,
         callFound: 2,
@@ -347,9 +348,9 @@ test("tests/micro/Function.prototype.bind", async () => {
     });
 });
 
-test("tests/micro/Function.prototype.call", async () => {
-    await runTest("tests/micro", "Function.prototype.call.js", {
-        soundness: "tests/micro/Function.prototype.call.json",
+test("tests/micro/call", async () => {
+    await runTest("tests/micro", "call.js", {
+        soundness: "tests/micro/call.json",
         funFound: 1,
         funTotal: 1,
         callFound: 1,
@@ -841,9 +842,26 @@ test("tests/micro/for-in", async () => {
     });
 });
 
-test("tests/micro/wrong-package-json-found", async () => {
-    await runTest("tests/micro/wrong-package-json-found", "index.js", {
-        patterns: ["tests/micro/wrong-package-json-found/wrong-package-json-found-patterns.json"],
-        matches: {total: 1}
+test("tests/micro/packagejson", async () => {
+    const vulnerabilities: Vulnerability[] = [{
+        osv: {
+            cvss: {
+                score: 1,
+                vectorString: null
+            },
+            cwe: ['1'],
+            dependency: "terser",
+            name: "terser",
+            range: "<2.0.0",
+            severity: 'high',
+            source: 1,
+            title: "title",
+            url: 'url'
+        },
+        patterns: ["<terser>.minify"],
+    }];
+    await runTest("tests/micro/packagejson", "index.js", {
+        vulnerabilities,
+        vulnerabilitiesMatches: 1
     });
 });

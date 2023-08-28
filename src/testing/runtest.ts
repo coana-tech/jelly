@@ -1,17 +1,15 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import {options} from "../options";
+import {options, setDefaultTrackedModules, setPatternProperties} from "../options";
 import {tapirLoadPatterns, tapirPatternMatch} from "../patternmatching/tapirpatterns";
 import {analyzeFiles} from "../analysis/analyzer";
 import assert from "assert";
-import {testSoundness} from "../dynamic/soundnesstester";
 import {AnalysisStateReporter} from "../output/analysisstatereporter";
 import Solver from "../analysis/solver";
 import {getAPIUsage} from "../patternmatching/apiusage";
 import {FragmentState} from "../analysis/fragmentstate";
-import logger from "../misc/logger";
 import {compareCallGraphs} from "../output/compare";
+import {VulnerabilityDetector} from "../patternmatching/vulnerabilitydetector";
+import {getGlobs, getProperties} from "../patternmatching/patternloader";
+import {Vulnerability} from "../typings/vulnerabilities";
 
 export async function runTest(basedir: string,
                               app: string | Array<string>,
@@ -30,6 +28,8 @@ export async function runTest(basedir: string,
                                   reachableFound?: number,
                                   reachableTotal?: number,
                                   apiUsageAccessPathPatternsAtNodes?: number
+                                  vulnerabilities?: Vulnerability[],
+                                  vulnerabilitiesMatches?: number
                               }) {
     options.basedir = basedir;
     options.patterns = args.patterns;
@@ -44,37 +44,26 @@ export async function runTest(basedir: string,
         options.trackedModules ??= ['**'];
     }
 
-    if (options.soundness)
-        // ensure that calls are registered
-        options.callgraphJson = "truthy";
-
     const files = Array.isArray(app) ? app : [app]
     const solver = new Solver();
+    let vulnerabilityDetector;
+    if (args.vulnerabilities) {
+        options.vulnerabilities = 'someFile'; // dummy value for the analysis to know that vulnerabilities is used
+        vulnerabilityDetector = new VulnerabilityDetector(args.vulnerabilities);
+        const qs = vulnerabilityDetector.getPatterns();
+        setDefaultTrackedModules(getGlobs(qs));
+        setPatternProperties(getProperties(qs));
+        solver.globalState.vulnerabilities = vulnerabilityDetector;
+    }
     await analyzeFiles(files, solver);
 
     let soundness;
-    if (args.soundness) {
-        soundness = testSoundness(args.soundness, solver.fragmentState);
-
-        // test that the output of compareCallGraphs agrees with the soundness tester
-        const output: string[] = [];
-        const spy = jest.spyOn(logger, "info").mockImplementation((line) => output.push(line as unknown as string) as any);
-        const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), "jelly-runTest-cgcompare-"));
-        try {
-            const cgpath = path.join(tmpdir, "callgraph.json")
-            new AnalysisStateReporter(solver.fragmentState).saveCallGraph(cgpath, files);
-            compareCallGraphs(args.soundness, cgpath)
-        } finally {
-            spy.mockRestore();
-            await fs.rm(tmpdir, { recursive: true });
-        }
-
-        const [_, funRecall, __, callRecall, ___, reachRecall] =
-            [...output.join("\n").matchAll(/: (\d+\/\d+)(?: \(|$)/g)].map((match) => match[1]);
-        expect(funRecall).toBe(`${soundness.fun2funFound}/${soundness.fun2funTotal}`);
-        expect(callRecall).toBe(`${soundness.call2funFound}/${soundness.call2funTotal}`);
-        expect(reachRecall).toBe(`${soundness.reachableFound}/${soundness.reachableTotal}`);
-    }
+    if (args.soundness)
+        soundness = compareCallGraphs(
+            args.soundness, "<computed>",
+            new AnalysisStateReporter(solver.fragmentState).callGraphToJSON(files),
+            /* compareBothWays */ false,
+        );
 
     if (args.functionInfos !== undefined)
         expect(solver.globalState.functionInfos.size).toBe(args.functionInfos);
@@ -110,6 +99,12 @@ export async function runTest(basedir: string,
             for (const ns of m.values())
                 numAccessPathPatternsAtNodes += ns.size;
         expect(numAccessPathPatternsAtNodes).toBe(args.apiUsageAccessPathPatternsAtNodes);
+    }
+    if (args.vulnerabilitiesMatches !== undefined) {
+        if (!vulnerabilityDetector)
+            throw new Error("vulnerabilitiesMatches can only be checked if vulnerabilities has been given.");
+        const matches = vulnerabilityDetector.patternMatch(solver.fragmentState, undefined, solver.diagnostics)
+        expect(matches.size).toBe(args.vulnerabilitiesMatches);
     }
 }
 
