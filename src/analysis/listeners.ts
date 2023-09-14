@@ -40,6 +40,9 @@ export enum TokenListener {
     MAKE_PROMISE_RACE,
     AWAIT,
     JSX_ELEMENT,
+    NATIVE_OBJECT_CREATE,
+    NATIVE_OBJECT_DEFINE_PROPERTY,
+    NATIVE_OBJECT_DEFINE_PROPERTIES,
     NATIVE_1, // TODO: better names to these token listeners?
     NATIVE_2,
     NATIVE_3,
@@ -64,4 +67,5 @@ export enum TokenListener {
     NATIVE_22,
     NATIVE_23,
     NATIVE_24,
+    NATIVE_25,
 }

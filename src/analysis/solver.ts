@@ -15,6 +15,7 @@ import {
     mapGetSet,
     mapMapMapSetAll,
     mapMapSetAll,
+    mapMapSize,
     mapSetAddAll,
     nodeToString,
     setAll
@@ -75,6 +76,10 @@ export default class Solver {
         packages: 0,
         modules: 0,
         functions: 0,
+        vars: 0,
+        listeners: 0,
+        tokens: 0,
+        subsetEdges: 0,
         functionToFunctionEdges: 0,
         iterations: 0,
         uniqueTokens: 0,
@@ -108,6 +113,13 @@ export default class Solver {
         const f = this.fragmentState;
         const d = this.diagnostics;
         d.functions = a.functionInfos.size;
+        d.vars = f.getNumberOfVarsWithTokens();
+        d.listeners = [
+            f.tokenListeners, f.pairListeners1, f.pairListeners2, f.packageNeighborListeners,
+            f.ancestorListeners, f.arrayEntriesListeners, f.objectPropertiesListeners,
+        ].reduce((acc, l: Map<Object, Map<Object, Object>>) => acc + mapMapSize(l), 0);
+        d.tokens = f.numberOfTokens;
+        d.subsetEdges = f.numberOfSubsetEdges;
         d.functionToFunctionEdges = f.numberOfFunctionToFunctionEdges;
         d.uniqueTokens = f.a.canonicalTokens.size;
         d.maxMemoryUsage = Math.max(d.maxMemoryUsage, getMemoryUsage());
@@ -444,8 +456,10 @@ export default class Solver {
      * By default also notifies listeners.
      */
     addPackageNeighbor(k1: PackageInfo, k2: PackageInfo, propagate: boolean = true) {
-        this.addPackageNeighborPrivate(k1, k2, propagate);
-        this.addPackageNeighborPrivate(k2, k1, propagate);
+        if (options.readNeighbors) {
+            this.addPackageNeighborPrivate(k1, k2, propagate);
+            this.addPackageNeighborPrivate(k2, k1, propagate);
+        }
     }
 
     private addPackageNeighborPrivate(k: PackageInfo, neighbor: PackageInfo, propagate: boolean = true) {
@@ -504,23 +518,52 @@ export default class Solver {
         if (!st.has(parent)) {
             if (logger.isDebugEnabled())
                 logger.debug(`Adding inheritance relation ${child} -> ${parent}`);
-            st.add(parent);
-            mapGetSet(f.reverseInherits, parent).add(child);
+
             if (propagate) {
-                for (const des of f.getDescendants(child)) {
-                    const ts = f.ancestorListeners.get(des);
-                    if (ts)
-                        for (const anc of f.getAncestors(parent))
-                            for (const [n, listener] of ts) {
-                                const p = mapGetSet(f.ancestorListenersProcessed, n);
-                                if (!p.has(anc)) {
-                                    this.enqueueListenerCall([listener, anc]);
-                                    this.ancestorListenerNotifications++;
-                                    p.add(anc);
-                                }
+                const ancestors = f.getAncestors(parent);
+                const descendants = f.getDescendants(child);
+
+                // flood fill graph from Q and return reachable nodes
+                function flood(Q: Token[], edges: Map<Token, Set<Token>>): Set<Token> {
+                    const res = new Set(Q);
+                    while (Q.length) {
+                        const tok = Q.pop()!;
+                        for (const j of edges.get(tok) ?? [])
+                            if (!res.has(j)) {
+                                res.add(j);
+                                Q.push(j);
                             }
+                    }
+                    return res;
+                }
+
+                // collect descendants which already inherit from parent
+                // we don't need to notify them or any of their descendants
+                const optDes = flood([...descendants].filter((des) => f.inherits.get(des)!.has(parent)), f.reverseInherits);
+
+                // similar, but for ancestors
+                for (const anc of flood([...ancestors].filter((anc) => st.has(anc)), f.inherits))
+                    ancestors.delete(anc);
+
+                for (const des of descendants) if (!optDes.has(des)) {
+                    const ts = f.ancestorListeners.get(des);
+                    if (!ts)
+                        continue
+
+                    for (const anc of ancestors)
+                        for (const [n, listener] of ts) {
+                            const p = mapGetSet(f.ancestorListenersProcessed, n);
+                            if (!p.has(anc)) {
+                                this.enqueueListenerCall([listener, anc]);
+                                this.ancestorListenerNotifications++;
+                                p.add(anc);
+                            }
+                        }
                 }
             }
+
+            st.add(parent);
+            mapGetSet(f.reverseInherits, parent).add(child);
         }
     }
 
@@ -643,16 +686,16 @@ export default class Solver {
      * @param base the constraint variable for the base expression
      * @param pck the current package object token
      */
-    collectPropertyRead(result: ConstraintVar | undefined, base: ConstraintVar | undefined, pck: PackageObjectToken) {
+    collectPropertyRead(result: ConstraintVar | undefined, base: ConstraintVar | undefined, pck: PackageObjectToken, prop: string | undefined) { // TODO: rename to registerPropertyRead, move to FragmentState
         if (result && base)
-            this.fragmentState.maybeEmptyPropertyReads.push({result, base, pck});
+            this.fragmentState.maybeEmptyPropertyReads.push({result, base, pck, prop});
     }
 
     /**
      * Collects dynamic property write operations.
      * @param base the constraint variable for the base expression
      */
-    collectDynamicPropertyWrite(base: ConstraintVar | undefined) {
+    collectDynamicPropertyWrite(base: ConstraintVar | undefined) { // TODO: rename to registerDynamicPropertyWrite, move to FragmentState
         if (base)
             this.fragmentState.dynamicPropertyWrites.add(base);
     }
@@ -973,7 +1016,7 @@ export default class Solver {
     /**
      * Merges the given fragment state into the current fragment state.
      */
-    merge(s: FragmentState, propagate: boolean = true) { // TODO: reconsider use of 'propagate' flag
+    merge(s: FragmentState, propagate: boolean) { // TODO: reconsider use of 'propagate' flag
         const f = this.fragmentState;
         // merge redirections
         if (options.cycleElimination)

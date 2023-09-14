@@ -62,7 +62,8 @@ program
     // .option("--bottom-up", "analyze bottom-up in package dependency structure") // TODO: bottom-up analysis disabled for now
     .option("--no-alloc", "disable light-weight allocation site abstraction")
     .option("--no-widening", "disable widening")
-    .option("--no-patch-dynamics", "disable patching of dynamic property accesses")
+    .option("--no-patch-dynamics", "disable dynamic property access heuristic")
+    .option("--no-read-neighbors", "disable package neighbor heuristic")
     .option("--no-cycle-elimination", "disable cycle elimination")
     .option("--no-natives", "disable nonessential models of native libraries")
     .option("--skip-graal-test", "skip graal-nodejs test (use with -d)")
@@ -90,6 +91,7 @@ program
     .option("--typescript-library-usage <file>", "save TypeScript library usage in JSON file, no analysis")
     .option("--modules-only", "report reachable packages and modules only, no analysis")
     .option("--compare-callgraphs", "compare two call graphs given as JSON files, no analysis")
+    .option("--reachability", "compare reachability as an additional call graph comparison metric (use with -s or --compare-callgraphs)")
     .usage("[options] [files]")
     .addHelpText("after",
         "\nAll modules reachable by require/import from the given files are included in the analysis\n" +
@@ -123,7 +125,7 @@ async function main() {
             process.exitCode = -1;
             return;
         }
-        compareCallGraphs(program.args[0], program.args[1]);
+        compareCallGraphs(program.args[0], program.args[1], undefined, true, options.reachability);
         return;
     }
 
@@ -322,7 +324,7 @@ async function main() {
                 out.reportReachablePackagesAndModules();
 
             if (options.soundness)
-                compareCallGraphs(options.soundness, "<computed>", out.callGraphToJSON(files), false);
+                compareCallGraphs(options.soundness, "<computed>", out.callGraphToJSON(files), false, options.reachability);
 
             if (tapirPatterns && patterns)
                 tapirPatternMatch(tapirPatterns, patterns, solver, typer, undefined);

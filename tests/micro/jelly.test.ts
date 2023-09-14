@@ -49,6 +49,38 @@ test("tests/micro/accessors2", async () => {
     });
 });
 
+test("tests/micro/defineProperty", async () => {
+    await runTest("tests/micro", "defineProperty.js", {
+        soundness: "tests/micro/defineProperty.json",
+        functionInfos: 10,
+        moduleInfos: 1,
+        numberOfFunctionToFunctionEdges: 12,
+        oneCalleeCalls: 15,
+        funFound: 6,
+        funTotal: 6,
+        callFound: 9,
+        callTotal: 9,
+        reachableFound: 11,
+        reachableTotal: 11,
+    });
+});
+
+test("tests/micro/create", async () => {
+    await runTest("tests/micro", "create.js", {
+        soundness: "tests/micro/create.json",
+        functionInfos: 2,
+        moduleInfos: 1,
+        numberOfFunctionToFunctionEdges: 2,
+        oneCalleeCalls: 2,
+        funFound: 2,
+        funTotal: 2,
+        callFound: 2,
+        callTotal: 2,
+        reachableFound: 3,
+        reachableTotal: 3,
+    });
+});
+
 test("tests/micro/eval", async () => {
     await runTest("tests/micro", "eval.js", {
         soundness: "tests/micro/eval.json",
@@ -210,6 +242,16 @@ test("tests/micro/arrays2", async () => {
         callTotal: 6,
         reachableFound: 7,
         reachableTotal: 7
+    });
+});
+
+test("tests/micro/arrays3", async () => {
+    await runTest("tests/micro", "arrays3.js", {
+        soundness: "tests/micro/arrays3.json",
+        functionInfos: 6,
+        moduleInfos: 1,
+        numberOfFunctionToFunctionEdges: 6,
+        oneCalleeCalls: 6,
     });
 });
 
@@ -389,6 +431,22 @@ test("tests/micro/obj", async () => {
         callTotal: 1,
         reachableFound: 2,
         reachableTotal: 2
+    });
+});
+
+test("tests/micro/obj2", async () => {
+    await runTest("tests/micro", "obj2.js", {
+        soundness: "tests/micro/obj2.json",
+        functionInfos: 2,
+        moduleInfos: 1,
+        numberOfFunctionToFunctionEdges: 2,
+        oneCalleeCalls: 5,
+        funFound: 2,
+        funTotal: 2,
+        callFound: 5,
+        callTotal: 5,
+        reachableFound: 3,
+        reachableTotal: 3,
     });
 });
 
