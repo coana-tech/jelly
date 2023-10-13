@@ -44,7 +44,7 @@ import {
     PackageObjectToken,
     Token
 } from "./tokens";
-import {AccessorType, ConstraintVar, IntermediateVar, isObjectProperyVarObj, NodeVar} from "./constraintvars";
+import {AccessorType, ConstraintVar, IntermediateVar, isObjectPropertyVarObj, NodeVar} from "./constraintvars";
 import {
     CallResultAccessPath,
     IgnoredAccessPath,
@@ -82,12 +82,6 @@ import {callPromiseResolve} from "../natives/nativehelpers";
  */
 export class Operations {
 
-    readonly file: FilePath;
-
-    readonly solver: Solver;
-
-    readonly moduleSpecialNatives: SpecialNativeObjects;
-
     readonly globalSpecialNatives: SpecialNativeObjects; // shortcut to this.solver.globalState.globalSpecialNatives
 
     readonly a: GlobalState; // shortcut to this.solver.globalState
@@ -100,11 +94,11 @@ export class Operations {
 
     readonly exportsObjectToken: NativeObjectToken;
 
-    constructor(file: FilePath, solver: Solver, moduleSpecialNatives: SpecialNativeObjects) {
-        this.file = file;
-        this.solver = solver;
-        this.moduleSpecialNatives = moduleSpecialNatives;
-
+    constructor(
+        readonly file: FilePath,
+        readonly solver: Solver,
+        readonly moduleSpecialNatives: SpecialNativeObjects
+    ) {
         this.globalSpecialNatives = this.solver.globalState.globalSpecialNatives!;
         this.a = this.solver.globalState;
 
@@ -275,7 +269,7 @@ export class Operations {
             for (const argVar of argVars)
                 f.registerEscapingFromModule(argVar);
         const hasArguments = f.functionsWithArguments.has(t.fun);
-        const argumentsToken = hasArguments ? this.a.canonicalizeToken(new ArrayToken(t.fun.body, this.packageInfo)) : undefined;
+        const argumentsToken = hasArguments ? this.a.canonicalizeToken(new ArrayToken(t.fun.body)) : undefined;
         for (let i = 0; i < argVars.length; i++) {
             const argVar = argVars[i];
             // constraint: ...: ⟦Ei⟧ ⊆ ⟦Xi⟧ for each argument/parameter i (Xi may be a pattern)
@@ -305,9 +299,6 @@ export class Operations {
         // constraint: ...: ⟦ret_t⟧ ⊆ ⟦(new) E0(E1,...,En)⟧
         if (!isParentExpressionStatement(pars))
             this.solver.addSubsetConstraint(vp.returnVar(t.fun), resultVar);
-        // constraint: ...: t_arguments ∈ ⟦t_arguments⟧ if the function uses 'arguments'
-        if (hasArguments)
-            this.solver.addTokenConstraint(argumentsToken!, vp.argumentsVar(t.fun));
     }
 
     /**
@@ -328,12 +319,16 @@ export class Operations {
                 if (t instanceof FunctionToken && t.fun.params.length === 0) {
                     if (dst)
                         this.solver.addSubsetConstraint(this.solver.varProducer.returnVar(t.fun), dst);
-                    if (base && this.solver.fragmentState.functionsWithThis.has(t.fun))
-                        this.solver.addSubsetConstraint(base, this.solver.varProducer.thisVar(t.fun));
                     this.solver.fragmentState.registerCall(node, this.moduleInfo, {accessor: true});
                     this.solver.fragmentState.registerCallEdge(node, enclosing, this.a.functionInfos.get(t.fun)!, {accessor: true});
                 }
-            }
+            };
+
+            const bindGetterThis = (baset: Token, t: Token) => {
+                if (t instanceof FunctionToken && t.fun.params.length === 0)
+                    if (this.solver.fragmentState.functionsWithThis.has(t.fun))
+                        this.solver.addTokenConstraint(baset, this.solver.varProducer.thisVar(t.fun));
+            };
 
             // constraint: ∀ objects t ∈ ⟦E⟧: ...
             this.solver.addForAllConstraint(base, TokenListener.READ_PROPERTY_BASE, node, (t: Token) => {
@@ -346,8 +341,12 @@ export class Operations {
                         if (dst)
                             this.solver.addSubsetConstraint(this.solver.varProducer.objPropVar(t2, prop), dst); // TODO: exclude AccessPathTokens?
 
-                        // constraint: ... ∀ functions t3 ∈ ⟦(get)t2.p⟧: ⟦ret_t3⟧ ⊆ ⟦E.p⟧
-                        this.solver.addForAllConstraint(this.solver.varProducer.objPropVar(t2, prop, "get"), TokenListener.READ_PROPERTY_GETTER, node, readFromGetter);
+                        // constraint: ... ∀ functions t3 ∈ ⟦(get)t2.p⟧: ⟦ret_t3⟧ ⊆ ⟦E.p⟧ (unless NativeObjectToken or "prototype")
+                        if (!(t2 instanceof NativeObjectToken) && prop !== "prototype") {
+                            const getter = this.solver.varProducer.objPropVar(t2, prop, "get");
+                            this.solver.addForAllConstraint(getter, TokenListener.READ_PROPERTY_GETTER, node, (t3: Token) => readFromGetter(t3));
+                            this.solver.addForAllConstraint(getter, TokenListener.READ_PROPERTY_GETTER_THIS, t, (t3: Token) => bindGetterThis(t, t3));
+                        }
 
                         if (t2 instanceof PackageObjectToken) {
                             // TODO: also reading from neighbor packages if t2 is a PackageObjectToken...
@@ -355,7 +354,12 @@ export class Operations {
                                 this.solver.addForAllPackageNeighborsConstraint(t2.packageInfo, node, (neighbor: PackageInfo) => { // TODO: also use t2.kind
                                     if (dst)
                                         this.solver.addSubsetConstraint(this.solver.varProducer.packagePropVar(neighbor, prop), dst); // TODO: exclude AccessPathTokens?
-                                    this.solver.addForAllConstraint(this.solver.varProducer.packagePropVar(neighbor, prop, "get"), TokenListener.READ_PROPERTY_GETTER2, node, readFromGetter);
+                                    if (prop !== "prototype") {
+                                        const nt = this.a.canonicalizeToken(new PackageObjectToken(neighbor));
+                                        const getter = this.solver.varProducer.packagePropVar(neighbor, prop, "get");
+                                        this.solver.addForAllConstraint(getter, TokenListener.READ_PROPERTY_GETTER2, node, (t3: Token) => readFromGetter(t3));
+                                        this.solver.addForAllConstraint(getter, TokenListener.READ_PROPERTY_GETTER_THIS2, nt, (t3: Token) => bindGetterThis(nt, t3));
+                                    }
                                 });
 
                         } else if (t2 instanceof ArrayToken) {
@@ -432,22 +436,33 @@ export class Operations {
         const writeToSetter = (t: Token) => {
             if (t instanceof FunctionToken && t.fun.params.length === 1) {
                 this.solver.addSubsetConstraint(src, this.solver.varProducer.nodeVar(t.fun.params[0]));
-                if (this.solver.fragmentState.functionsWithThis.has(t.fun))
-                    this.solver.addTokenConstraint(base, this.solver.varProducer.thisVar(t.fun));
                 this.solver.fragmentState.registerCall(node, this.moduleInfo, {accessor: true});
                 this.solver.fragmentState.registerCallEdge(node, enclosing, this.a.functionInfos.get(t.fun)!, {accessor: true});
             }
         };
 
-        if (isObjectProperyVarObj(base)) {
+        const bindSetterThis = (t: Token) => {
+            if (t instanceof FunctionToken && t.fun.params.length === 1)
+                if (this.solver.fragmentState.functionsWithThis.has(t.fun))
+                    this.solver.addTokenConstraint(base, this.solver.varProducer.thisVar(t.fun));
+        };
+
+        if (isObjectPropertyVarObj(base)) {
             // FIXME: special treatment of writes to "prototype" and "__proto__"
 
             // constraint: ...: ⟦E2⟧ ⊆ ⟦base.p⟧
-            this.solver.addSubsetConstraint(src, this.solver.varProducer.objPropVar(base, prop, ac));
+            if (src)
+                this.solver.addSubsetConstraint(src, this.solver.varProducer.objPropVar(base, prop, ac));
 
             if (invokeSetters)
-                // constraint: ...: ∀ functions t2 ∈ ⟦(set)base.p⟧: ⟦E2⟧ ⊆ ⟦x⟧ where x is the parameter of t2
-                this.solver.addForAllConstraint(this.solver.varProducer.objPropVar(base, prop, "set"), TokenListener.ASSIGN_SETTER, node, writeToSetter);
+                if (!(base instanceof NativeObjectToken) && prop !== "prototype") {
+                    // constraint: ...: ∀ functions t2 ∈ ⟦(set)base.p⟧: ⟦E2⟧ ⊆ ⟦x⟧ where x is the parameter of t2
+                    const setter = this.solver.varProducer.objPropVar(base, prop, "set");
+                    this.solver.addForAllConstraint(setter, TokenListener.ASSIGN_SETTER, node, writeToSetter);
+                    this.solver.addForAllConstraint(setter, TokenListener.ASSIGN_SETTER_THIS, base, bindSetterThis);
+
+                    // TODO: also obtain setters from ancestors of base
+                }
 
             // values written to native object escape
             if (base instanceof NativeObjectToken && (base.moduleInfo || base.name === "globalThis")) // TODO: other natives? packageObjectTokens?
@@ -459,7 +474,8 @@ export class Operations {
 
         } else if (lVar && base instanceof AccessPathToken) {
             // constraint: ...: ⟦E2⟧ ⊆ ⟦k.p⟧ where k is the current PackageObjectToken
-            this.solver.addSubsetConstraint(src, this.solver.varProducer.packagePropVar(this.packageInfo, prop));
+            if (src)
+                this.solver.addSubsetConstraint(src, this.solver.varProducer.packagePropVar(this.packageInfo, prop));
 
             // collect property write operation @E1.p
             this.solver.addAccessPath(new PropertyAccessPath(lVar, prop), this.solver.varProducer.nodeVar(escapeNode), base.ap);
@@ -536,11 +552,11 @@ export class Operations {
             if (m) {
 
                 // add access path token
-                const analyzed = m instanceof ModuleInfo && (!options.ignoreDependencies || this.a.entryFiles.has(m.getPath()));
+                const analyzed = m instanceof ModuleInfo && m.isIncluded;
                 if (!analyzed || options.vulnerabilities || options.vulnerabilitiesJSON) {
                     const s = normalizeModuleName(str);
                     const tracked = options.trackedModules && options.trackedModules.find(e =>
-                        micromatch.isMatch(m!.getOfficialName(), e) || micromatch.isMatch(s, e))
+                        micromatch.isMatch(m!.getOfficialName(), e) || micromatch.isMatch(s, e));
                     this.solver.addAccessPath(tracked ? new ModuleAccessPath(m, s) : IgnoredAccessPath.instance, resultVar);
                 }
 
@@ -574,12 +590,27 @@ export class Operations {
         } else if (isMemberExpression(dst) || isOptionalMemberExpression(dst)) {
             const lVar = this.expVar(dst.object, path);
             const prop = getProperty(dst);
+            const enclosing = this.a.getEnclosingFunctionOrModule(path, this.moduleInfo);
+
+            const assignRequireExtensions = (t: Token) => {
+                if (t instanceof NativeObjectToken && t.name === "require.extensions")
+                    // when a function is assigned to require.extensions, add an external call edge
+                    this.solver.addForAllConstraint(src, TokenListener.ASSIGN_REQUIRE_EXTENSIONS, path.node, (t: Token) => {
+                        if (t instanceof FunctionToken) {
+                            this.solver.fragmentState.registerCall(dst, this.moduleInfo, {external: true});
+                            this.solver.fragmentState.registerCallEdge(dst, enclosing, this.a.functionInfos.get(t.fun)!, {external: true});
+                        }
+                    });
+            };
+
             if (prop !== undefined) {
                 // E1.prop = E2
 
                 // constraint: ∀ objects t ∈ ⟦E1⟧: ...
-                this.solver.addForAllConstraint(lVar, TokenListener.ASSIGN_MEMBER_BASE, dst, (t: Token) =>
-                    this.writeProperty(src, lVar, t, prop, dst, this.a.getEnclosingFunctionOrModule(path, this.moduleInfo), path.node));
+                this.solver.addForAllConstraint(lVar, TokenListener.ASSIGN_MEMBER_BASE, dst, (t: Token) => {
+                    this.writeProperty(src, lVar, t, prop, dst, enclosing, path.node);
+                    assignRequireExtensions(t);
+                });
 
                 // TODO: special treatment for E.prototype? and other standard properties?
 
@@ -603,6 +634,8 @@ export class Operations {
                             if (logger.isInfoEnabled())
                                 this.solver.fragmentState.registerUnhandledDynamicPropertyWrite(path.node, src, options.warningsUnsupported && logger.isVerboseEnabled() ? path.getSource() : undefined);
                         }
+
+                        assignRequireExtensions(t);
                     });
                 // TODO: computed property assignments (with known prefix/suffix)
 
@@ -717,7 +750,7 @@ export class Operations {
      */
     newObjectToken(n: Node): ObjectToken | PackageObjectToken {
         if (options.alloc) {
-            const t = this.a.canonicalizeToken(new ObjectToken(n, this.packageInfo));
+            const t = this.a.canonicalizeToken(new ObjectToken(n));
             if (!(this.solver.fragmentState.widened && this.solver.fragmentState.widened.has(t))) {
                 this.solver.addInherits(t, this.globalSpecialNatives.get(OBJECT_PROTOTYPE)!);
                 return t;
@@ -730,7 +763,7 @@ export class Operations {
      * Creates a new ArrayToken that inherits from Array.prototype.
      */
     newArrayToken(n: Node): ArrayToken {
-        const t = this.a.canonicalizeToken(new ArrayToken(n, this.packageInfo));
+        const t = this.a.canonicalizeToken(new ArrayToken(n));
         this.solver.addInherits(t, this.globalSpecialNatives.get(ARRAY_PROTOTYPE)!);
         return t;
     }
@@ -739,7 +772,7 @@ export class Operations {
      * Creates a new ClassToken that inherits from Function.prototype.
      */
     newClassToken(n: Node): ClassToken {
-        const t = this.a.canonicalizeToken(new ClassToken(n, this.packageInfo));
+        const t = this.a.canonicalizeToken(new ClassToken(n));
         this.solver.addInherits(t, this.globalSpecialNatives.get(FUNCTION_PROTOTYPE)!);
         return t;
     }
@@ -766,7 +799,7 @@ export class Operations {
      * Creates a AllocationSiteToken of kind Promise that inherits from Promise.prototype.
      */
     newPromiseToken(n: Node): AllocationSiteToken {
-        const t = this.a.canonicalizeToken(new AllocationSiteToken("Promise", n, this.packageInfo));
+        const t = this.a.canonicalizeToken(new AllocationSiteToken("Promise", n));
         this.solver.addInherits(t, this.globalSpecialNatives.get(PROMISE_PROTOTYPE)!);
         return t;
     }

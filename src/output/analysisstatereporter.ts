@@ -1,16 +1,16 @@
 import logger from "../misc/logger";
-import {deleteAll, FilePath, getOrSet, Location, locationToStringWithFile, locationToStringWithFileAndEnd} from "../misc/util";
+import {deleteAll, FilePath, getOrSet, Location, locationToStringWithFile, locationToStringWithFileAndEnd, mapGetArray} from "../misc/util";
 import {GlobalState} from "../analysis/globalstate";
 import {FunctionToken, NativeObjectToken, Token} from "../analysis/tokens";
 import fs from "fs";
-import {ConstraintVar, FunctionReturnVar, NodeVar, ObjectPropertyVar} from "../analysis/constraintvars";
+import {ConstraintVar, NodeVar, ObjectPropertyVar} from "../analysis/constraintvars";
 import {FragmentState} from "../analysis/fragmentstate";
 import {relative, resolve} from "path";
 import {options} from "../options";
 import {DummyModuleInfo, FunctionInfo, ModuleInfo} from "../analysis/infos";
 import {Function, isIdentifier, Node, SourceLocation} from "@babel/types";
 import assert from "assert";
-import {AnalysisDiagnostics} from "../typings/diagnostics";
+import AnalysisDiagnostics from "../analysis/diagnostics";
 import {CallGraph} from "../typings/callgraph";
 
 /**
@@ -31,15 +31,17 @@ export class AnalysisStateReporter {
      * Saves the constraint variables and their tokens to a JSON file.
      */
     saveTokens(outfile: string) {
+        const varIndex = new Map<ConstraintVar, number>();
         const fd = fs.openSync(outfile, "w");
         fs.writeSync(fd, "[");
         let firstvar = true;
         for (const [v, ts] of this.f.getAllVarsAndTokens()) {
+            varIndex.set(v, varIndex.size);
             if (firstvar)
                 firstvar = false;
             else
                 fs.writeSync(fd, ",");
-            fs.writeSync(fd, `\n { "var": ${JSON.stringify(v.toString)}, "tokens": [`);
+            fs.writeSync(fd, `\n { "var": ${JSON.stringify(v.toString())}, "tokens": [`);
             let firsttoken = true;
             for (const t of ts) {
                 if (firsttoken)
@@ -49,6 +51,13 @@ export class AnalysisStateReporter {
                 fs.writeSync(fd, `\n  ${JSON.stringify(t.toString())}`);
             }
             fs.writeSync(fd, "\n ] }");
+        }
+        for (const v of this.f.redirections.keys()) {
+            const repi = varIndex.get(this.f.getRepresentative(v));
+            if (repi !== undefined) {
+                assert(!firstvar);
+                fs.writeSync(fd, `,\n { "var": ${JSON.stringify(v.toString())}, "rep": ${repi} }`);
+            }
         }
         fs.writeSync(fd, "\n]");
         fs.closeSync(fd);
@@ -229,14 +238,29 @@ export class AnalysisStateReporter {
      */
     reportTokens() {
         logger.info("Tokens:");
-        for (const [v, ts, size] of this.f.getAllVarsAndTokens())
-            if (size > 0 &&
-                !(((v instanceof ObjectPropertyVar && v.obj instanceof NativeObjectToken) || // TODO: don't omit native variables that contain non-native values?
-                    (v instanceof NodeVar && isIdentifier(v.node) && v.node.loc?.start.line === 0)) && size === 1)) {
-                logger.info(`  ${v}: (size ${size})`);
-                for (const t of ts)
-                    logger.info(`    ${t}`);
+        const redir = new Map<ConstraintVar, Array<ConstraintVar>>();
+        for (const [v, w] of this.f.redirections)
+            mapGetArray(redir, this.f.getRepresentative(w)).push(v);
+        for (const [v, ts, size] of this.f.getAllVarsAndTokens()) {
+            if (size === 0)
+                continue;
+            if (size === 1) {
+                let any = false;
+                for (const w of [v, ...redir.get(v) ?? []])
+                    if (!((w instanceof ObjectPropertyVar && w.obj instanceof NativeObjectToken) || // TODO: don't omit native variables that contain non-native values?
+                        (w instanceof NodeVar && isIdentifier(w.node) && w.node.loc?.start.line === 0))) {
+                        any = true;
+                        break;
+                    }
+                if (!any)
+                    continue;
             }
+            logger.info(`  ${v}: (size ${size})`);
+            for (const w of redir.get(v) ?? [])
+                logger.info(`  ${w} (redirected)`);
+            for (const t of ts)
+                logger.info(`    ${t}`);
+        }
     }
 
     /**
@@ -338,7 +362,7 @@ export class AnalysisStateReporter {
      * Returns the functions that have zero callers.
      */
     getZeroCallerFunctions(): Set<FunctionInfo> {
-        let funs = new Set(this.a.functionInfos.values());
+        const funs = new Set(this.a.functionInfos.values());
         for (const fs of this.f.functionToFunction.values())
             deleteAll(fs.values(), funs);
         return funs;
@@ -418,16 +442,17 @@ export class AnalysisStateReporter {
         const funargs = new Map<Function, number>();
         for (const [f, vs] of this.f.functionParameters) {
             for (const v of vs)
-                for (const t of this.f.getTokens(v))
+                for (const t of this.f.getTokens(this.f.getRepresentative(v)))
                     if (t instanceof FunctionToken)
                         funargs.set(f, (funargs.get(f) || 0) + 1);
         }
         const funreturns = new Map<Function, number>();
-        for (const v of this.f.vars)
-            if (v instanceof FunctionReturnVar)
-                for (const t of this.f.getTokens(v))
-                    if (t instanceof FunctionToken)
-                        funreturns.set(v.fun, (funreturns.get(v.fun) || 0) + 1);
+        for (const f of this.a.functionInfos.keys()) {
+            const v = this.f.varProducer.returnVar(f);
+            for (const t of this.f.getTokens(this.f.getRepresentative(v)))
+                if (t instanceof FunctionToken)
+                    funreturns.set(f, (funreturns.get(f) || 0) + 1);
+        }
         logger.info("Higher-order functions (function arguments + function return values):");
         const a = [];
         for (const f of [...funargs.keys(), ...funreturns.keys()])

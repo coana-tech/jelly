@@ -1,5 +1,5 @@
 import {Class, Function, Identifier, Node} from "@babel/types";
-import {FilePath, getOrSet, Location, locationToString} from "../misc/util";
+import {FilePath, getOrSet, Location, locationToString, strHash} from "../misc/util";
 import {ConstraintVar, NodeVar} from "./constraintvars";
 import {Token} from "./tokens";
 import {getPackageJsonInfo, PackageJsonInfo} from "../misc/packagejson";
@@ -109,7 +109,7 @@ export class GlobalState {
     /**
      * TSModuleResolver instance which caches lookups of tsconfig.json files.
      */
-     readonly tsModuleResolver = new TSModuleResolver();
+    readonly tsModuleResolver = new TSModuleResolver();
 
     /**
      * Number of calls to canonicalizeVar.
@@ -157,7 +157,9 @@ export class GlobalState {
      */
     canonicalizeToken<T extends Token>(t: T): T {
         this.numberOfCanonicalizeTokenCalls++;
-        return getOrSet(this.canonicalTokens, t.toString(), () => t) as T;
+        const s = t.toString();
+        t.hash = strHash(s);
+        return getOrSet(this.canonicalTokens, s, () => t) as T;
     }
 
     /**
@@ -234,14 +236,15 @@ export class GlobalState {
             } else {
 
                 // module has not been reached before, create new ModuleInfo
-                moduleInfo = new ModuleInfo(rel, packageInfo, from === undefined);
+                const ignoreModule = from && (options.ignoreDependencies ||
+                    (!packageInfo.isEntry && ((options.includePackages && !options.includePackages.includes(packageInfo.name))
+                        || options.excludePackages?.includes(packageInfo.name))));
+                moduleInfo = new ModuleInfo(rel, packageInfo, from === undefined, !ignoreModule);
                 packageInfo.modules.set(rel, moduleInfo);
 
                 // record that module has been reached
                 this.reachedFiles.add(tofile);
-                if (from && (options.ignoreDependencies ||
-                    (!moduleInfo.packageInfo.isEntry && ((options.includePackages && !options.includePackages.includes(moduleInfo.packageInfo.name))
-                        || (options.excludePackages && options.excludePackages.includes(moduleInfo.packageInfo.name))))))
+                if (ignoreModule)
                     logger.info(`Ignoring module ${moduleInfo}`);
                 else
                     this.pendingFiles.push(tofile);

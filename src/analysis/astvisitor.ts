@@ -79,6 +79,7 @@ import {
 import {
     AccessPathToken,
     AllocationSiteToken,
+    ArrayToken,
     ClassToken,
     FunctionToken,
     NativeObjectToken,
@@ -88,7 +89,7 @@ import {
 } from "./tokens";
 import {ModuleInfo} from "./infos";
 import logger from "../misc/logger";
-import {mapArrayAdd, locationToStringWithFile} from "../misc/util";
+import {locationToStringWithFile, mapArrayAdd} from "../misc/util";
 import assert from "assert";
 import {options} from "../options";
 import {ComponentAccessPath, PropertyAccessPath, UnknownAccessPath} from "./accesspaths";
@@ -188,7 +189,7 @@ export function visit(ast: File, op: Operations) {
                         if (fun.node.generator) {
                             // find the iterator object (it is returned via Function)
                             // constraint: ... ⊆ ⟦i.value⟧ where i is the iterator object for the function
-                            const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun.node.body, op.packageInfo));
+                            const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun.node.body));
                             resVar = vp.objPropVar(iter, "value");
                         } else {
                             // constraint: ... ⊆ ⟦ret_f⟧ where f is the enclosing function (ignoring top-level returns)
@@ -207,43 +208,55 @@ export function visit(ast: File, op: Operations) {
             }
         },
 
-        Function(path: NodePath<Function>) { // FunctionDeclaration | FunctionExpression | ObjectMethod | ArrowFunctionExpression | ClassMethod | ClassPrivateMethod
-            // record that a function/method/constructor/getter/setter has been reached, connect to its enclosing function or module
-            const fun = path.node;
-            let cls;
-            if (isClassMethod(fun) && fun.kind === "constructor")
-                cls = getClass(path);
-            const name = isFunctionDeclaration(path.node) || isFunctionExpression(path.node) ? path.node.id?.name :
-                (isObjectMethod(path.node) || isClassMethod(path.node)) ? getKey(path.node) :
-                    cls ? cls.id?.name : undefined;// for constructors, use the class name if present
-            const anon = isFunctionDeclaration(path.node) || isFunctionExpression(path.node) ? path.node.id === null : isArrowFunctionExpression(path.node);
-            const msg = cls ? "constructor" : `${name ?? (anon ? "<anonymous>" : "<computed>")}`;
-            if (logger.isVerboseEnabled())
-                logger.verbose(`Reached function ${msg} at ${locationToStringWithFile(fun.loc)}`);
-            a.registerFunctionInfo(op.file, path, name, fun);
-            if (!name && !anon)
-                f.warnUnsupported(fun, `Computed ${isFunctionDeclaration(path.node) || isFunctionExpression(path.node) ? "function" : "method"} name`); // TODO: handle functions/methods with unknown name?
+        Function: { // FunctionDeclaration | FunctionExpression | ObjectMethod | ArrowFunctionExpression | ClassMethod | ClassPrivateMethod
+            enter(path: NodePath<Function>) {
 
-            // process destructuring for parameters and register identifier parameters
-            for (const param of fun.params) {
-                const paramVar = op.solver.varProducer.nodeVar(param);
-                if (isIdentifier(param))
-                    f.registerFunctionParameter(paramVar, path.node);
-                else
-                    op.assign(paramVar, param, path);
-            }
+                // record that a function/method/constructor/getter/setter has been reached, connect to its enclosing function or module
+                const fun = path.node;
+                let cls;
+                if (isClassMethod(fun) && fun.kind === "constructor")
+                    cls = getClass(path);
+                const name = isFunctionDeclaration(path.node) || isFunctionExpression(path.node) ? path.node.id?.name :
+                    (isObjectMethod(path.node) || isClassMethod(path.node)) ? getKey(path.node) :
+                        cls ? cls.id?.name : undefined;// for constructors, use the class name if present
+                const anon = isFunctionDeclaration(path.node) || isFunctionExpression(path.node) ? path.node.id === null : isArrowFunctionExpression(path.node);
+                const msg = cls ? "constructor" : `${name ?? (anon ? "<anonymous>" : "<computed>")}`;
+                if (logger.isVerboseEnabled())
+                    logger.verbose(`Reached function ${msg} at ${locationToStringWithFile(fun.loc)}`);
+                a.registerFunctionInfo(op.file, path, name, fun);
+                if (!name && !anon)
+                    f.warnUnsupported(fun, `Computed ${isFunctionDeclaration(path.node) || isFunctionExpression(path.node) ? "function" : "method"} name`); // TODO: handle functions/methods with unknown name?
 
-            if (fun.generator) {
+                // process destructuring for parameters and register identifier parameters
+                for (const param of fun.params) {
+                    const paramVar = op.solver.varProducer.nodeVar(param);
+                    if (isIdentifier(param))
+                        f.registerFunctionParameter(paramVar, path.node);
+                    else
+                        op.assign(paramVar, param, path);
+                }
 
-                // function*
+                if (fun.generator) {
 
-                // constraint: %(Async)Generator.prototype.next ⊆ ⟦i.next⟧ where i is the iterator object for the function
-                const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun.body, op.packageInfo));
-                const iterNext = vp.objPropVar(iter, "next");
-                solver.addTokenConstraint(op.globalSpecialNatives.get(fun.async ? ASYNC_GENERATOR_PROTOTYPE_NEXT : GENERATOR_PROTOTYPE_NEXT)!, iterNext);
+                    // function*
 
-                // constraint i ∈ ⟦ret_f⟧ where i is the iterator object for the function
-                solver.addTokenConstraint(iter, vp.returnVar(fun));
+                    // constraint: %(Async)Generator.prototype.next ⊆ ⟦i.next⟧ where i is the iterator object for the function
+                    const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun.body));
+                    const iterNext = vp.objPropVar(iter, "next");
+                    solver.addTokenConstraint(op.globalSpecialNatives.get(fun.async ? ASYNC_GENERATOR_PROTOTYPE_NEXT : GENERATOR_PROTOTYPE_NEXT)!, iterNext);
+
+                    // constraint i ∈ ⟦ret_f⟧ where i is the iterator object for the function
+                    solver.addTokenConstraint(iter, vp.returnVar(fun));
+                }
+            },
+
+            exit(path: NodePath<Function>) {
+                // constraint: ...: t_arguments ∈ ⟦t_arguments⟧ if the function uses 'arguments'
+                const fun = path.node;
+                if (f.functionsWithArguments.has(fun)) {
+                    const argumentsToken = a.canonicalizeToken(new ArrayToken(fun.body));
+                    solver.addTokenConstraint(argumentsToken!, vp.argumentsVar(fun));
+                }
             }
         },
 
@@ -394,12 +407,12 @@ export function visit(ast: File, op: Operations) {
                         let dst;
                         if (options.alloc && isObjectProperty(path.node)) {
                             // constraint: ⟦E⟧ ⊆ ⟦i.p⟧ where i is the object literal
-                            dst = vp.objPropVar(a.canonicalizeToken(new ObjectToken(path.parentPath.node, op.packageInfo)), key);
+                            dst = vp.objPropVar(a.canonicalizeToken(new ObjectToken(path.parentPath.node)), key);
                         } else if (options.alloc && (isClassProperty(path.node) || isClassAccessorProperty(path.node) || isClassPrivateProperty(path.node)) && path.node.static) {
                             // constraint: ⟦E⟧ ⊆ ⟦c.p⟧ where c is the class
                             const cls = getClass(path);
                             assert(cls);
-                            dst = vp.objPropVar(a.canonicalizeToken(new ClassToken(cls, op.packageInfo)), key);
+                            dst = vp.objPropVar(a.canonicalizeToken(new ClassToken(cls)), key);
                         } else {
                             // constraint: ⟦E⟧ ⊆ ⟦k.p⟧ where k is the current package
                             dst = vp.packagePropVar(op.file, key);
@@ -430,13 +443,13 @@ export function visit(ast: File, op: Operations) {
                             if (options.alloc && isObjectMethod(path.node)) {
                                 // constraint: t ∈ ⟦(ac)i.p⟧ where t denotes the function, i is the object literal,
                                 // and (ac) specifies whether it is a getter, setter or normal property
-                                dst = vp.objPropVar(a.canonicalizeToken(new ObjectToken(path.parentPath.node, op.packageInfo)), key, ac);
+                                dst = vp.objPropVar(a.canonicalizeToken(new ObjectToken(path.parentPath.node)), key, ac);
                             } else if (options.alloc && (isClassMethod(path.node) || isClassPrivateMethod(path.node)) && path.node.static) {
                                 // constraint: t ∈ ⟦(ac)c.p⟧ where t denotes the function, c is the class,
                                 // and (ac) specifies whether it is a getter, setter or normal property
                                 const cls = getClass(path);
                                 assert(cls);
-                                dst = vp.objPropVar(a.canonicalizeToken(new ClassToken(cls, op.packageInfo)), key, ac);
+                                dst = vp.objPropVar(a.canonicalizeToken(new ClassToken(cls)), key, ac);
 
                             } else {
                                 // constraint: t ∈ ⟦(ac)k.p⟧ where t denotes the function and k is the current package,
@@ -698,7 +711,7 @@ export function visit(ast: File, op: Operations) {
         YieldExpression(path: NodePath<YieldExpression>) {
             const fun = path.getFunctionParent()?.node;
             assert(fun, "yield not in function?!");
-            const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun.body, op.packageInfo));
+            const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun.body));
             const iterValue = vp.objPropVar(iter, "value");
             if (path.node.argument) {
                 if (path.node.delegate) {

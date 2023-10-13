@@ -1,5 +1,5 @@
 import {Function, Node} from "@babel/types";
-import {locationToStringWithFileAndEnd} from "../misc/util";
+import {Location, locationToStringWithFileAndEnd} from "../misc/util";
 import assert from "assert";
 import {ModuleInfo, PackageInfo} from "./infos";
 import {AccessPath} from "./accesspaths";
@@ -10,6 +10,8 @@ import {NativeFunctionAnalyzer} from "../natives/nativebuilder";
  */
 export abstract class Token {
 
+    hash: number = 0; // set by canonicalizeToken
+
     abstract toString(): string
 }
 
@@ -18,14 +20,11 @@ export abstract class Token {
  */
 export class FunctionToken extends Token {
 
-    readonly fun: Function;
-
-    readonly moduleInfo: ModuleInfo;
-
-    constructor(fun: Function, moduleInfo: ModuleInfo) {
+    constructor(
+        readonly fun: Function,
+        readonly moduleInfo: ModuleInfo
+    ) {
         super();
-        this.fun = fun;
-        this.moduleInfo = moduleInfo;
     }
 
     toString() {
@@ -50,17 +49,11 @@ export type ObjectKind = "Object" | "Array" | "Class" | "Map" | "Set" | "WeakMap
  */
 export class AllocationSiteToken extends Token {
 
-    readonly kind: ObjectKind;
-
-    readonly allocSite: Node;
-
-    readonly packageInfo: PackageInfo;
-
-    constructor(kind: ObjectKind, allocSite: Node, packageInfo: PackageInfo) {
+    constructor(
+        readonly kind: ObjectKind,
+        readonly allocSite: Node
+    ) {
         super();
-        this.kind = kind;
-        this.allocSite = allocSite;
-        this.packageInfo = packageInfo;
         assert(this instanceof ArrayToken || kind !== "Array", "AllocationSiteTokens of kind Array must be created using ArrayToken");
         assert(this instanceof ObjectToken || kind !== "Object", "AllocationSiteTokens of kind Object must be created using ObjectToken");
         assert(this instanceof ClassToken || kind !== "Class", "AllocationSiteTokens of kind Class must be created using ClassToken");
@@ -76,8 +69,14 @@ export class AllocationSiteToken extends Token {
  */
 export class ObjectToken extends AllocationSiteToken {
 
-    constructor(allocSite: Node, packageInfo: PackageInfo) {
-        super("Object", allocSite, packageInfo);
+    constructor(allocSite: Node) {
+        super("Object", allocSite);
+    }
+
+    getPackageInfo() {
+        const loc = this.allocSite.loc as Location;
+        assert(loc && loc.module);
+        return loc.module.packageInfo;
     }
 }
 
@@ -86,8 +85,8 @@ export class ObjectToken extends AllocationSiteToken {
  */
 export class ArrayToken extends AllocationSiteToken {
 
-    constructor(allocSite: Node, packageInfo: PackageInfo) {
-        super("Array", allocSite, packageInfo);
+    constructor(allocSite: Node) {
+        super("Array", allocSite);
     }
 }
 
@@ -96,8 +95,8 @@ export class ArrayToken extends AllocationSiteToken {
  */
 export class ClassToken extends AllocationSiteToken {
 
-    constructor(allocSite: Node, packageInfo: PackageInfo) {
-        super("Class", allocSite, packageInfo);
+    constructor(allocSite: Node) {
+        super("Class", allocSite);
     }
 }
 
@@ -106,20 +105,13 @@ export class ClassToken extends AllocationSiteToken {
  */
 export class NativeObjectToken extends Token {
 
-    readonly name: string;
-
-    readonly moduleInfo: ModuleInfo | undefined;
-
-    readonly invoke: NativeFunctionAnalyzer | undefined;
-
-    readonly constr: boolean;
-
-    constructor(name: string, moduleInfo?: ModuleInfo, invoke?: NativeFunctionAnalyzer, constr: boolean = false) {
+    constructor(
+        readonly name: string,
+        readonly moduleInfo?: ModuleInfo,
+        readonly invoke?: NativeFunctionAnalyzer,
+        readonly constr: boolean = false
+    ) {
         super();
-        this.name = name;
-        this.moduleInfo = moduleInfo;
-        this.invoke = invoke;
-        this.constr = constr;
     }
 
     toString() {
@@ -132,18 +124,15 @@ export class NativeObjectToken extends Token {
  */
 export class PackageObjectToken extends Token {
 
-    readonly kind: ObjectKind;
-
-    readonly packageInfo: PackageInfo;
-
-    constructor(packageInfo: PackageInfo, kind: ObjectKind = "Object") {
+    constructor(
+        readonly packageInfo: PackageInfo,
+        readonly kind: ObjectKind = "Object"
+    ) {
         super();
-        this.kind = kind;
-        this.packageInfo = packageInfo;
     }
 
     toString() {
-        return `*${this.kind === "Object" ? "" : `(${this.kind})`}[${this.packageInfo}]`
+        return `*${this.kind === "Object" ? "" : `(${this.kind})`}[${this.packageInfo}]`;
     }
 }
 
@@ -153,11 +142,8 @@ export class PackageObjectToken extends Token {
  */
 export class AccessPathToken extends Token {
 
-    readonly ap: AccessPath;
-
-    constructor(ap: AccessPath) {
+    constructor(readonly ap: AccessPath) {
         super();
-        this.ap = ap;
     }
 
     toString(): string {

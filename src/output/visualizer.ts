@@ -1,6 +1,6 @@
 import {readFileSync, writeFileSync} from "fs";
 import {FunctionInfo, ModuleInfo, PackageInfo} from "../analysis/infos";
-import {addAll, getOrSet, mapGetMap} from "../misc/util";
+import {addAll, getOrSet, locationToString, mapGetArray, mapGetMap} from "../misc/util";
 import {ConstraintVar, NodeVar, ObjectPropertyVar} from "../analysis/constraintvars";
 import {FragmentState} from "../analysis/fragmentstate";
 import {NativeObjectToken, Token} from "../analysis/tokens";
@@ -72,34 +72,27 @@ class Elements {
 }
 
 /**
- * Finds the functions that are reachable from the entries, and their modules and packages.
+ * Finds the modules and functions that are reachable from the entries, and their packages.
  */
 function getReachable(f: FragmentState): Set<PackageInfo | ModuleInfo | FunctionInfo> {
     const reachable = new Set<PackageInfo | ModuleInfo | FunctionInfo>();
-    const w = new Set<ModuleInfo | FunctionInfo>();
+    const w = new Array<ModuleInfo | FunctionInfo>();
     function reach(v: ModuleInfo | FunctionInfo) {
-        if (!reachable.has(v) && !w.has(v))
-            w.add(v);
+        if (!reachable.has(v)) {
+            reachable.add(v);
+            w.push(v);
+        }
     }
     for (const e of f.a.entryFiles)
-        w.add(f.a.moduleInfosByPath.get(e)!);
-    for (const v of w) {
-       reachable.add(v);
-       for (const n of [...f.requireGraph.get(v) || [], ...f.functionToFunction.get(v) || []])
-           reach(n);
+        reach(f.a.moduleInfosByPath.get(e)!);
+    while (w.length > 0) {
+        const v = w.pop()!;
+        for (const n of [...f.requireGraph.get(v) || [], ...f.functionToFunction.get(v) || []])
+            reach(n);
     }
-    for (const m of f.a.moduleInfos.values()) {
-        let r = false;
-        for (const f of m.functions)
-            if (reachable.has(f)) {
-                r = true;
-                break;
-            }
-        if (r)
-            reachable.add(m);
+    for (const m of f.a.moduleInfos.values())
         if (reachable.has(m))
             reachable.add(m.packageInfo);
-    }
     return reachable;
 }
 
@@ -107,12 +100,16 @@ function getReachable(f: FragmentState): Set<PackageInfo | ModuleInfo | Function
  * Checks whether the constraint variable is "trivial", i.e., it has no tokens or it is a native object property
  * with only the native library value, or it represents 'undefined'.
  */
-function isTrivialVar(v: ConstraintVar, ts: Iterable<Token>, size: number): boolean {
+function isTrivialVar(v: ConstraintVar, ts: Iterable<Token>, size: number, redir: Map<ConstraintVar, Array<ConstraintVar>>): boolean {
     if (size > 1)
         return false;
     if (size === 0 || (v instanceof NodeVar && isIdentifier(v.node) && v.node.loc?.start.line === 0))
         return true;
-    return v instanceof ObjectPropertyVar && v.obj instanceof NativeObjectToken && ts[Symbol.iterator]().next().value instanceof NativeObjectToken;
+    const first = ts[Symbol.iterator]().next().value;
+    for (const w of [v, ...redir.get(v) ?? []])
+        if (!(w instanceof ObjectPropertyVar && w.obj instanceof NativeObjectToken && first instanceof NativeObjectToken))
+            return false;
+    return true;
 }
 
 /**
@@ -168,6 +165,25 @@ function getVisualizerCallGraph(f: FragmentState, vulnerabilities: Vulnerability
             isReachable: reachable.has(p) ? "true" : undefined
         });
     }
+
+    function addFunction(n: FunctionInfo, parent: FunctionInfo | ModuleInfo) {
+        const functionCallCount = functionCallCounts.get(n) ?? 0;
+        e.add({
+            id: id(n),
+            kind: "function",
+            parent: id(parent),
+            name: (n.name ?? "<anon>") + ` ${locationToString(n.node.loc, false, true)}`,
+            fullName: funcToStringWithCode(n),
+            callWeight: Math.round(100 * functionCallCount / maxFunctionCallCount),
+            callCount: functionCallCount,
+            isReachable: reachable.has(n) ? "true" : undefined,
+        });
+
+        for (const fun of n.functions)
+            // use parent instead of n to nest all functions directly in the module
+            addFunction(fun, n);
+    }
+
     // add nodes for modules
     for (const m of f.a.moduleInfos.values()) {
         const moduleCallCount = moduleCallCounts.get(m) ?? 0;
@@ -182,20 +198,9 @@ function getVisualizerCallGraph(f: FragmentState, vulnerabilities: Vulnerability
             isEntry: m.isEntry ? "true" : undefined,
             isReachable: reachable.has(m) ? "true" : undefined
         });
-    }
-    // add nodes for functions
-    for (const n of f.a.functionInfos.values()) {
-        const functionCallCount = functionCallCounts.get(n) ?? 0;
-        e.add({
-            id: id(n),
-            kind: "function",
-            parent: id(n.moduleInfo),
-            name: n.name ?? "<anon>",
-            fullName: funcToStringWithCode(n),
-            callWeight: Math.round(100 * functionCallCount / maxFunctionCallCount),
-            callCount: functionCallCount,
-            isReachable: reachable.has(n) ? "true" : undefined
-        });
+        // add nodes for functions
+        for (const fun of m.functions)
+            addFunction(fun, m);
     }
     // add edges
     let numEdges = 0;
@@ -263,7 +268,7 @@ function getVisualizerCallGraph(f: FragmentState, vulnerabilities: Vulnerability
                 title: getVulnerabilityId(v),
                 package: {sources: [], targets: []},
                 module: {sources: [], targets: []},
-                function:  {sources: [], targets: []}
+                function: {sources: [], targets: []}
             };
             for (const kind of ["package", "module", "function"] as const) {
                 const ss = sources.get(v);
@@ -299,8 +304,11 @@ function getVisualizerDataFlowGraphs(f: FragmentState): VisualizerGraphs {
     const packageTokenCounts = new Map<PackageInfo, number>();
     const nontrivialVars = new Set<ConstraintVar>(), anyEdges = new Set<ConstraintVar>();
     const parents = new Map<ConstraintVar, PackageInfo | ModuleInfo>();
+    const redir = new Map<ConstraintVar, Array<ConstraintVar>>();
+    for (const [v, w] of f.redirections)
+        mapGetArray(redir, f.getRepresentative(w)).push(v);
     for (const [v, ts, size] of f.getAllVarsAndTokens()) {
-        if (!isTrivialVar(v, ts, size)) {
+        if (!isTrivialVar(v, ts, size, redir)) {
             nontrivialVars.add(v);
             const p = f.a.getConstraintVarParent(v);
             if (p)

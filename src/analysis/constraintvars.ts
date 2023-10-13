@@ -10,6 +10,7 @@ import {
 } from "./tokens";
 import {ModuleInfo, PackageInfo} from "./infos";
 import {IDENTIFIER_KIND} from "./astvisitor";
+import Solver from "./solver";
 
 /**
  * A constraint variable.
@@ -37,11 +38,8 @@ export abstract class ConstraintVar {
  */
 export class NodeVar extends ConstraintVar {
 
-    readonly node: Node;
-
-    constructor(node: Node) {
+    constructor(readonly node: Node) {
         super();
-        this.node = node;
     }
 
     toString(): string {
@@ -64,7 +62,7 @@ export type AccessorType = "get" | "set" | "normal";
 
 export type ObjectPropertyVarObj = AllocationSiteToken | FunctionToken | NativeObjectToken | PackageObjectToken;
 
-export function isObjectProperyVarObj(t: Token | undefined): t is ObjectPropertyVarObj {
+export function isObjectPropertyVarObj(t: Token | undefined): t is ObjectPropertyVarObj {
     return t instanceof AllocationSiteToken || t instanceof FunctionToken || t instanceof PackageObjectToken || t instanceof NativeObjectToken;
 }
 
@@ -73,17 +71,23 @@ export function isObjectProperyVarObj(t: Token | undefined): t is ObjectProperty
  */
 export class ObjectPropertyVar extends ConstraintVar {
 
-    readonly obj: ObjectPropertyVarObj;
-
-    readonly prop: string
-
-    readonly accessor: AccessorType;
-
-    constructor(obj: ObjectPropertyVarObj, prop: string, accessor: AccessorType = "normal") {
+    private constructor(
+        readonly obj: ObjectPropertyVarObj,
+        readonly prop: string,
+        readonly accessor: AccessorType,
+    ) {
         super();
-        this.prop = prop;
-        this.obj = obj;
-        this.accessor = accessor;
+    }
+
+    /*
+     * Factory method for creation of ObjectPropertyVars.
+     * The (obj, prop) pair is registered on the provided solver instance and listener calls may be enqueued.
+     */
+    static make(solver: Solver, obj: ObjectPropertyVarObj, prop: string, accessor: AccessorType = "normal"): ObjectPropertyVar {
+        solver.addObjectProperty(obj, prop);
+        if (obj instanceof ArrayToken)
+            solver.addArrayEntry(obj, prop);
+        return new ObjectPropertyVar(obj, prop, accessor);
     }
 
     toString(): string {
@@ -103,11 +107,8 @@ export class ObjectPropertyVar extends ConstraintVar {
  */
 export class ArrayValueVar extends ConstraintVar {
 
-    readonly array: ArrayToken;
-
-    constructor(array: ArrayToken) {
+    constructor(readonly array: ArrayToken) {
         super();
-        this.array = array;
     }
 
     toString(): string {
@@ -124,11 +125,8 @@ export class ArrayValueVar extends ConstraintVar {
  */
 export class FunctionReturnVar extends ConstraintVar {
 
-    readonly fun: Function;
-
-    constructor(fun: Function) {
+    constructor(readonly fun: Function) {
         super();
-        this.fun = fun;
     }
 
     toString() {
@@ -145,11 +143,8 @@ export class FunctionReturnVar extends ConstraintVar {
  */
 export class ThisVar extends ConstraintVar {
 
-    readonly fun: Function;
-
-    constructor(fun: Function) {
+    constructor(readonly fun: Function) {
         super();
-        this.fun = fun;
     }
 
     toString() {
@@ -166,11 +161,8 @@ export class ThisVar extends ConstraintVar {
  */
 export class ArgumentsVar extends ConstraintVar {
 
-    readonly fun: Function;
-
-    constructor(fun: Function) {
+    constructor(readonly fun: Function) {
         super();
-        this.fun = fun;
     }
 
     toString() {
@@ -187,11 +179,8 @@ export class ArgumentsVar extends ConstraintVar {
  */
 export class ClassExtendsVar extends ConstraintVar {
 
-    readonly cl: Class;
-
-    constructor(cl: Class) {
+    constructor(readonly cl: Class) {
         super();
-        this.cl = cl;
     }
 
     toString() {
@@ -208,14 +197,11 @@ export class ClassExtendsVar extends ConstraintVar {
  */
 export class IntermediateVar extends ConstraintVar {
 
-    readonly node: Node;
-
-    readonly label: string;
-
-    constructor(node: Node, label: string) {
+    constructor(
+        readonly node: Node,
+        readonly label: string
+    ) {
         super();
-        this.node = node;
-        this.label = label;
     }
 
     toString() {
