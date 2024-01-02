@@ -56,12 +56,14 @@ program
     // .option("--graphviz-packages <package...>", "packages to include in Graphviz dot file (use with -g)")
     // .option("--graphviz-elide-functions", "elide functions (use with -g)")
     // .option("--graphviz-dependencies-only", "show module dependencies only (use with -g)")
+    .option("--callgraph", "report call graph")
     .option("--tokens-json <file>", "save tokens for constraint variables as JSON file")
     .option("--tokens", "report tokens for constraint variables")
     .option("--largest", "report largest token sets and subset relations")
     .option("--no-alloc", "disable light-weight allocation site abstraction")
     .option("--no-widening", "disable widening")
-    .option("--no-patch-dynamics", "disable dynamic property access heuristic")
+    .option("--no-patch-dynamics", "disable dynamic property access patching heuristic")
+    .option("--patch-method-calls", "enable method call patching heuristic")
     .option("--no-read-neighbors", "disable package neighbor heuristic")
     .option("--no-cycle-elimination", "disable cycle elimination")
     .option("--no-natives", "disable nonessential models of native libraries")
@@ -78,7 +80,7 @@ program
     .option("--zeros", "report calls with zero callees and functions with zero callers")
     .option("--exclude-entries <glob...>", "files to exclude when specifying entry directories")
     .option("--tracked-modules <glob...>", "modules to track usage of (default: empty unless using -p, -v or --api-usage)")
-    .option("--external-matches", "enable pattern matches from external code (default: false unless using -v)")
+    .option("--external-matches", "enable pattern matches from external code")
     .option("--no-callgraph-implicit", "omit implicit calls in call graph") // TODO: not yet including implicit valueOf/toString calls
     .option("--no-callgraph-native", "omit native calls in call graph") // TODO: not yet including the native functions themselves, only callbacks from native functions
     .option("--no-callgraph-require", "omit module loading in call graph") // TODO: currently works only for modules that are resolved successfully (and included even if --ignore-dependencies is used)?
@@ -91,6 +93,8 @@ program
     .option("--modules-only", "report reachable packages and modules only, no analysis")
     .option("--compare-callgraphs", "compare two call graphs given as JSON files, no analysis")
     .option("--reachability", "compare reachability as an additional call graph comparison metric (use with -s or --compare-callgraphs)")
+    .option("--newobj", "new object abstraction (experimental)")
+    .option("--proto", "model assignments to the __proto__ property")
     .usage("[options] [files]")
     .addHelpText("after",
         "\nAll modules reachable by require/import from the given files are included in the analysis\n" +
@@ -170,17 +174,19 @@ async function main() {
         if (options.npmTest) {
             cmd = "npm";
             args = ["test", ...program.args];
-            cwd = path.resolve(options.npmTest)
+            cwd = path.resolve(options.npmTest);
             // react-dom/test-utils' act method misbehaves in production environments
-            env = { NODE_ENV: "test" };
+            env = {NODE_ENV: "test"};
         } else {
             if (program.args.length === 0) {
                 logger.info("File missing, aborting");
                 return;
             }
+            const file = path.resolve(program.args[0]);
+            // use directory containing the analyzed file as basedir if unspecified
+            cwd = options.basedir ? path.resolve(options.basedir) : path.dirname(file);
             cmd = `${__dirname}/../bin/node`;
-            args = program.args;
-            cwd = process.cwd()
+            args = [path.relative(cwd, file)].concat(program.args.slice(1));
         }
         const dyn = path.resolve(options.dynamic);
         const t = spawnSync(cmd, args, {
@@ -191,8 +197,8 @@ async function main() {
                 ...env,
                 JELLY_OUT: dyn,
                 GRAAL_HOME: graalHome ? path.resolve(graalHome) : undefined,
-                PATH: `${__dirname}/../bin${path.delimiter}${process.env.PATH}`
-            }
+                PATH: `${__dirname}/../bin${path.delimiter}${process.env.PATH}`,
+            },
         });
         if (t.status === null) {
             logger.error(`Error: Unable to execute ${cmd}`);
@@ -206,7 +212,7 @@ async function main() {
             if (f.isFile()) {
                 const p = path.resolve(dir, f.name);
                 if (p.startsWith(`${dyn}-`)) { // instrumented execution has produced $JELLY-OUT-<PID> files
-                    cgs.push(JSON.parse(readFileSync(p, 'utf-8')) as CallGraph);
+                    cgs.push(JSON.parse(readFileSync(p, "utf-8")) as CallGraph);
                     unlinkSync(p);
                 }
             }
@@ -307,6 +313,9 @@ async function main() {
                 closeSync(fd);
                 logger.info(`Call graph written to ${file}`);
             }
+
+            if (options.callgraph)
+                out.reportCallGraph();
 
             if (options.tokens)
                 out.reportTokens();

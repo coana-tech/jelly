@@ -109,13 +109,6 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
 
     readonly reverseSubsetEdges: Map<RVT, Set<RVT>> = new Map; // (used by solver.redirect)
 
-    /**
-     * Inheritance relation. For each token, the map provides the tokens it may inherit from directly.
-     */
-    inherits: Map<Token, Set<Token>> = new Map;
-
-    reverseInherits: Map<Token, Set<Token>> = new Map;
-
     readonly arrayEntries: Map<ArrayToken, Set<string>> = new Map;
 
     readonly objectProperties: Map<ObjectPropertyVarObj, Set<string>> = new Map;
@@ -126,15 +119,9 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
 
     readonly pairListeners2: Map<RVT, Map<ListenerID, [ConstraintVar, (t1: AllocationSiteToken, t2: FunctionToken | AccessPathToken) => void]>> = new Map;
 
-    readonly listenersProcessed: Map<ListenerID, Set<Token>> = new Map;
+    readonly listenersProcessed: Map<ListenerID, Set<Token | bigint>> = new Map;
 
-    readonly pairListenersProcessed: Map<ListenerID, Map<AllocationSiteToken, Set<FunctionToken | AccessPathToken>>> = new Map;
-
-    readonly packageNeighborListeners: Map<PackageInfo, Map<Node, (neighbor: PackageInfo) => void>> = new Map;
-
-    ancestorListeners: Map<Token, Map<Node, (descendant: Token) => void>> = new Map;
-
-    readonly ancestorListenersProcessed: Map<Node, Set<Token>> = new Map;
+    readonly packageNeighborListeners: Map<PackageInfo, Map<ListenerID, (neighbor: PackageInfo) => void>> = new Map;
 
     readonly arrayEntriesListeners: Map<ArrayToken, Map<ListenerID, (prop: string) => void>> = new Map;
 
@@ -323,13 +310,21 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
 
     /**
      * Property reads that may have empty result.
+     * Used by patchDynamics.
      */
     maybeEmptyPropertyReads: Array<{result: ConstraintVar, base: ConstraintVar, pck: PackageObjectToken, prop: string | undefined}> = [];
 
     /**
      * Dynamic property writes.
+     * Used by patchDynamics.
      */
     dynamicPropertyWrites: Set<ConstraintVar> = new Set;
+
+    /**
+     * Method calls that may have empty base.
+     * Used by patchMethodCalls.
+     */
+    readonly maybeEmptyMethodCalls: Map<Node, {baseVar: ConstraintVar, prop: string, calleeVar: ConstraintVar}> = new Map;
 
     constructor(s: Solver) {
         this.a = s.globalState;
@@ -366,7 +361,7 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     /**
      * Registers a call location.
      */
-    registerCall(n: Node, m: ModuleInfo, {native, external, accessor}: {native?: boolean, external?: boolean, accessor?: boolean} = {}) {
+    registerCall(n: Node, {native, external, accessor}: {native?: boolean, external?: boolean, accessor?: boolean} = {}) {
         if (accessor && !options.callgraphImplicit)
             return;
         if (!this.callLocations.has(n) ||
@@ -383,9 +378,17 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     }
 
     /**
+     * Registers a method call.
+     */
+    registerMethodCall(node: Node, baseVar: ConstraintVar | undefined, prop: string | undefined, calleeVar: ConstraintVar | undefined) {
+        if (baseVar && prop !== undefined && calleeVar && options.patchMethodCalls)
+            this.maybeEmptyMethodCalls.set(node, {baseVar, prop, calleeVar});
+    }
+
+    /**
      * Registers a require/import call.
      */
-    registerRequireCall(node: Node, from:  ModuleInfo | FunctionInfo, m: ModuleInfo | DummyModuleInfo) {
+    registerRequireCall(node: Node, from: ModuleInfo | FunctionInfo, m: ModuleInfo | DummyModuleInfo) {
         if (options.callgraphRequire)
             mapGetSet(this.callToModule, node).add(m);
         mapGetSet(this.callToFunctionOrModule, node).add(m);
@@ -509,18 +512,20 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     }
 
     /**
-     * Reports warnings about unhandled dynamic property write operations with nonempty token sets.
+     * Reports warnings about unhandled dynamic property write operations.
      * The source code and the tokens are included in the output if loglevel is verbose or higher.
      */
-    reportNonemptyUnhandledDynamicPropertyWrites() {
+    reportUnhandledDynamicPropertyWrites() {
         for (const [node, {src, source}] of this.unhandledDynamicPropertyWrites.entries()) {
-            const [size, ts] = this.getTokensSize(this.getRepresentative(src));
-            if (size > 0) {
-                let funs = 0;
-                for (const t of ts)
-                    if (t instanceof FunctionToken)
-                        funs++;
-                this.warnUnsupported(node, `Nonempty dynamic property write (${funs} function${funs === 1 ? "" : "s"})`);
+            const ts = this.getTokens(this.getRepresentative(src));
+            let funs = 0, others = 0;
+            for (const t of ts)
+                if (t instanceof FunctionToken)
+                    funs++;
+                else if (!(t instanceof AccessPathToken))
+                    others++;
+            if (funs > 0 || others > 0) {
+                this.warnUnsupported(node, `Dynamic property write (${funs} function${funs === 1 ? "" : "s"}, ${others} other object${others === 1 ? "" : "s"})`);
                 if (logger.isVerboseEnabled() && source !== undefined) {
                     logger.warn(source);
                     for (const t of ts)
@@ -533,7 +538,7 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     /**
      * Reports warnings about unhandled dynamic property read operations.
      */
-    reportNonemptyUnhandledDynamicPropertyReads() {
+    reportUnhandledDynamicPropertyReads() {
         for (const node of this.unhandledDynamicPropertyReads)
             this.warnUnsupported(node, "Dynamic property read");
     }
@@ -767,41 +772,14 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
         return added;
     }
 
-    /**
-     * Returns the tokens the given token inherits from (reflexively and transitively).
+    /*
+     * If the provided token is an object token that has been widened, the corresponding package object token is returned.
+     * Otherwise the provided token is returned as is.
      */
-    getAncestors(t: Token): Set<Token> {
-        const res = new Set<Token>();
-        res.add(t);
-        const w = [t];
-        while (w.length !== 0) {
-            const s = this.inherits.get(w.pop()!);
-            if (s)
-                for (const p of s)
-                    if (!res.has(p)) {
-                        res.add(p);
-                        w.push(p);
-                    }
-        }
-        return res;
-    }
-
-    /**
-     * Returns the tokens that inherit from the given token (reflexively and transitively).
-     */
-    getDescendants(t: Token): Set<Token> {
-        const res = new Set<Token>();
-        res.add(t);
-        const w = [t];
-        while (w.length !== 0) {
-            const s = this.reverseInherits.get(w.pop()!);
-            if (s)
-                for (const p of s)
-                    if (!res.has(p)) {
-                        res.add(p);
-                        w.push(p);
-                    }
-        }
-        return res;
+    maybeWidened<T extends Token>(t: T): T | PackageObjectToken {
+        if (t instanceof ObjectToken && this.widened.has(t))
+            return this.a.canonicalizeToken(new PackageObjectToken(t.getPackageInfo(), t.kind));
+        else
+            return t;
     }
 }

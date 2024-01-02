@@ -3,17 +3,40 @@ import {runTest} from "../../src/testing/runtest";
 describe("tests/micro", () => {
 
     runTest("tests/micro", "classes.js", {
+        options: {newobj: true},
         soundness: "tests/micro/classes.json",
-        functionInfos: 39,
+        functionInfos: 45,
         moduleInfos: 1,
-        numberOfFunctionToFunctionEdges: 34,
-        oneCalleeCalls: 32,
-        funFound: 30,
-        funTotal: 30,
-        callFound: 36,
-        callTotal: 36,
-        reachableFound: 25,
+        numberOfFunctionToFunctionEdges: 39,
+        oneCalleeCalls: 41,
+        funTotal: 34,
+        callTotal: 40,
+        reachableFound: 30,
+        reachableTotal: 31,
+    });
+
+    runTest("tests/micro", "classes2.js", {
+        options: {newobj: true, proto: true},
+        soundness: "tests/micro/classes2.json",
+        functionInfos: 34,
+        moduleInfos: 1,
+        numberOfFunctionToFunctionEdges: 35,
+        oneCalleeCalls: 45,
+        funTotal: 33,
+        callTotal: 43,
         reachableTotal: 35,
+    });
+
+    runTest("tests/micro", "private.js", {
+        options: {newobj: true},
+        soundness: "tests/micro/private.json",
+        functionInfos: 6,
+        moduleInfos: 1,
+        numberOfFunctionToFunctionEdges: 6,
+        oneCalleeCalls: 4,
+        funTotal: 6,
+        callTotal: 6,
+        reachableTotal: 7,
     });
 
     runTest("tests/micro", "accessors.js", {
@@ -37,6 +60,24 @@ describe("tests/micro", () => {
         oneCalleeCalls: 4,
     });
 
+    runTest("tests/micro", "accessors3.js", {
+        options: {newobj: true},
+        soundness: "tests/micro/accessors3.json",
+    });
+
+    runTest("tests/micro", "accessors4.js", {
+        options: {newobj: true},
+        numberOfFunctionToFunctionEdges: 6,
+    });
+
+    runTest("tests/micro", "accessors5.js", {
+        options: {newobj: true},
+        soundness: "tests/micro/accessors5.json",
+        functionInfos: 2,
+        oneCalleeCalls: 2,
+        reachableTotal: 3,
+    });
+
     runTest("tests/micro", "defineProperty.js", {
         soundness: "tests/micro/defineProperty.json",
         functionInfos: 10,
@@ -51,6 +92,10 @@ describe("tests/micro", () => {
         reachableTotal: 11,
     });
 
+    runTest("tests/micro", "defineProperties.js", {
+        soundness: "tests/micro/defineProperties.json",
+    });
+
     runTest("tests/micro", "create.js", {
         soundness: "tests/micro/create.json",
         functionInfos: 2,
@@ -63,6 +108,22 @@ describe("tests/micro", () => {
         callTotal: 2,
         reachableFound: 3,
         reachableTotal: 3,
+    });
+
+    runTest("tests/micro", "assign1.js", {
+        soundness: "tests/micro/assign1.json",
+        functionInfos: 3,
+        moduleInfos: 1,
+        numberOfFunctionToFunctionEdges: 3,
+        oneCalleeCalls: 3,
+    });
+
+    runTest("tests/micro", "assign2.js", {
+        soundness: "tests/micro/assign2.json",
+        functionInfos: 4,
+        moduleInfos: 1,
+        numberOfFunctionToFunctionEdges: 4,
+        oneCalleeCalls: 1,
     });
 
     runTest("tests/micro", "eval.js", {
@@ -245,6 +306,14 @@ describe("tests/micro", () => {
         oneCalleeCalls: 6,
     });
 
+    runTest("tests/micro", "arrays4.js", {
+        soundness: "tests/micro/arrays4.json",
+    });
+
+    runTest("tests/micro", "arrays5.js", {
+        soundness: "tests/micro/arrays5.json",
+    });
+
     runTest("tests/micro", "iterators.js", {
         soundness: "tests/micro/iterators.json",
         functionInfos: 25,
@@ -274,16 +343,14 @@ describe("tests/micro", () => {
     });
 
     runTest("tests/micro", "generators.js", {
+        options: {newobj: true},
         soundness: "tests/micro/generators.json",
-        functionInfos: 23,
+        functionInfos: 24,
         moduleInfos: 1,
-        numberOfFunctionToFunctionEdges: 26,
-        oneCalleeCalls: 14,
-        funFound: 24,
-        funTotal: 24,
-        callFound: 24,
-        callTotal: 24,
-        reachableFound: 24,
+        numberOfFunctionToFunctionEdges: 27,
+        oneCalleeCalls: 15,
+        funTotal: 25,
+        callTotal: 25,
         reachableTotal: 25,
     });
 
@@ -563,20 +630,41 @@ describe("tests/micro", () => {
 
 
     runTest("tests/micro", "prototypes.js", {
+        options: {newobj: true},
+        soundness: "tests/micro/prototypes.json",
         functionInfos: 2,
         moduleInfos: 1,
-        numberOfFunctionToFunctionEdges: 1,
-        oneCalleeCalls: 1,
+        numberOfFunctionToFunctionEdges: 2,
+        oneCalleeCalls: 2,
     });
 
     runTest("tests/micro", "prototypes2.js", {
+        options: {newobj: true},
         soundness: "tests/micro/prototypes2.json",
-        functionInfos: 1,
+        functionInfos: 2,
         moduleInfos: 1,
-        numberOfFunctionToFunctionEdges: 1,
-        oneCalleeCalls: 1,
-        reachableFound: 2,
+        numberOfFunctionToFunctionEdges: 2,
+        oneCalleeCalls: 2,
         reachableTotal: 3,
+    });
+
+    runTest("tests/micro", "prototypes3.js", {
+        options: {newobj: true, proto: true, patchDynamics: false},
+        soundness: "tests/micro/prototypes3.json",
+        functionInfos: 5,
+        moduleInfos: 1,
+        numberOfFunctionToFunctionEdges: 4,
+        oneCalleeCalls: 2,
+        reachableTotal: 5,
+    });
+
+    runTest("tests/micro", "super.js", {
+        options: {newobj: true, proto: true},
+        soundness: "tests/micro/super.json",
+        functionInfos: 11,
+        moduleInfos: 1,
+        numberOfFunctionToFunctionEdges: 15,
+        oneCalleeCalls: 12,
     });
 
     runTest("tests/micro", "match1.js", {

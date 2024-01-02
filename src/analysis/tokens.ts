@@ -10,7 +10,7 @@ import {NativeFunctionAnalyzer} from "../natives/nativebuilder";
  */
 export abstract class Token {
 
-    hash: number = 0; // set by canonicalizeToken
+    hash: number | undefined; // set by canonicalizeToken
 
     abstract toString(): string
 }
@@ -20,15 +20,18 @@ export abstract class Token {
  */
 export class FunctionToken extends Token {
 
-    constructor(
-        readonly fun: Function,
-        readonly moduleInfo: ModuleInfo
-    ) {
+    constructor(readonly fun: Function) {
         super();
     }
 
     toString() {
         return `Function[${locationToStringWithFileAndEnd(this.fun.loc, true)}]`;
+    }
+
+    getPackageInfo(): PackageInfo {
+        const loc = this.fun.loc as Location;
+        assert(loc && loc.module);
+        return loc.module.packageInfo;
     }
 }
 
@@ -41,8 +44,10 @@ export class FunctionToken extends Token {
  *
  * PromiseResolve and PromiseReject represent the resolve and reject function arguments of promise executors,
  * using the same allocation site as the promise they belong to.
+ *
+ * Prototype represents prototype objects associated with functions.
  */
-export type ObjectKind = "Object" | "Array" | "Class" | "Map" | "Set" | "WeakMap" | "WeakSet" | "WeakRef" | "Iterator" | "RegExp" | "Date" | "Promise" | "PromiseResolve" | "PromiseReject";
+export type ObjectKind = "Object" | "Array" | "Class" | "Map" | "Set" | "WeakMap" | "WeakSet" | "WeakRef" | "Iterator" | "RegExp" | "Date" | "Promise" | "PromiseResolve" | "PromiseReject" | "Error" | "Prototype"; // XXX: "Class" unused if options.newobj enabled
 
 /**
  * Token that represents objects with a specific allocation site.
@@ -56,7 +61,7 @@ export class AllocationSiteToken extends Token {
         super();
         assert(this instanceof ArrayToken || kind !== "Array", "AllocationSiteTokens of kind Array must be created using ArrayToken");
         assert(this instanceof ObjectToken || kind !== "Object", "AllocationSiteTokens of kind Object must be created using ObjectToken");
-        assert(this instanceof ClassToken || kind !== "Class", "AllocationSiteTokens of kind Class must be created using ClassToken");
+        assert(this instanceof PrototypeToken || kind !== "Prototype", "AllocationSiteTokens of kind Prototype must be created using PrototypeToken");
     }
 
     toString() {
@@ -73,10 +78,20 @@ export class ObjectToken extends AllocationSiteToken {
         super("Object", allocSite);
     }
 
-    getPackageInfo() {
+    getPackageInfo(): PackageInfo {
         const loc = this.allocSite.loc as Location;
         assert(loc && loc.module);
         return loc.module.packageInfo;
+    }
+}
+
+/**
+ * Token that represents prototype objects associated with a function.
+ */
+export class PrototypeToken extends AllocationSiteToken {
+
+    constructor(allocSite: Node) {
+        super("Prototype", allocSite);
     }
 }
 
@@ -93,7 +108,7 @@ export class ArrayToken extends AllocationSiteToken {
 /**
  * Token that represents classes with a specific allocation site.
  */
-export class ClassToken extends AllocationSiteToken {
+export class ClassToken extends AllocationSiteToken { // XXX: unused if options.newobj enabled
 
     constructor(allocSite: Node) {
         super("Class", allocSite);

@@ -22,6 +22,7 @@ export const options: {
     largest: boolean,
     soundness: string | undefined,
     basedir: string,
+    callgraph: boolean,
     callgraphJson: string | undefined,
     tokensJson: string | undefined,
     alloc: boolean,
@@ -57,6 +58,7 @@ export const options: {
     maxRounds: number | undefined,
     diagnostics: boolean,
     patchDynamics: boolean,
+    patchMethodCalls: boolean,
     readNeighbors: boolean,
     typescriptLibraryUsage: string | undefined,
     higherOrderFunctions: boolean,
@@ -66,7 +68,9 @@ export const options: {
     vulnerabilitiesJSON: string | undefined,
     externalMatches: boolean,
     includePackages: Array<string> | undefined,
-    excludePackages: Array<string> | undefined
+    excludePackages: Array<string> | undefined,
+    newobj: boolean,
+    proto: boolean,
 } = {
     callgraphHtml: undefined,
     dataflowHtml: undefined,
@@ -81,6 +85,7 @@ export const options: {
     largest: false,
     soundness: undefined,
     basedir: "",
+    callgraph: false,
     callgraphJson: undefined,
     tokensJson: undefined,
     alloc: true,
@@ -116,6 +121,7 @@ export const options: {
     maxRounds: undefined,
     diagnostics: false,
     patchDynamics: true,
+    patchMethodCalls: false,
     readNeighbors: true,
     typescriptLibraryUsage: undefined,
     higherOrderFunctions: false,
@@ -125,7 +131,9 @@ export const options: {
     vulnerabilitiesJSON: undefined,
     externalMatches: false,
     includePackages: undefined,
-    excludePackages: undefined
+    excludePackages: undefined,
+    newobj: false,
+    proto: false,
 };
 
 export function setOptions(opts: OptionValues & Partial<typeof options>) {
@@ -136,8 +144,6 @@ export function setOptions(opts: OptionValues & Partial<typeof options>) {
     }
     if (options.apiUsage)
         options.ignoreDependencies = true;
-    if (options.vulnerabilities || options.vulnerabilitiesJSON)
-        options.externalMatches = true;
 }
 
 /**

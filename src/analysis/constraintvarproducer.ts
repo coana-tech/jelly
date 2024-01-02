@@ -1,5 +1,4 @@
 import {
-    Class,
     Expression,
     Function,
     Identifier,
@@ -12,7 +11,6 @@ import {
     isNumericLiteral,
     isParenthesizedExpression,
     isStringLiteral,
-    isSuper,
     isUnaryExpression,
     isUpdateExpression,
     JSXIdentifier,
@@ -23,9 +21,8 @@ import {
 import {NodePath} from "@babel/traverse";
 import {
     AccessorType,
+    AncestorsVar,
     ArgumentsVar,
-    ArrayValueVar,
-    ClassExtendsVar,
     ConstraintVar,
     FunctionReturnVar,
     IntermediateVar,
@@ -34,14 +31,14 @@ import {
     ObjectPropertyVarObj,
     ThisVar
 } from "./constraintvars";
-import {ArrayToken, ObjectToken, PackageObjectToken} from "./tokens";
+import {ArrayToken, ObjectToken, PackageObjectToken, Token} from "./tokens";
 import {FilePath, Location} from "../misc/util";
 import {PackageInfo} from "./infos";
 import {GlobalState} from "./globalstate";
-import {getClass} from "../misc/asthelpers";
 import {FragmentState, MergeRepresentativeVar, RepresentativeVar} from "./fragmentstate";
 import assert from "assert";
 import Solver from "./solver";
+import {ARRAY_ALL, ARRAY_UNKNOWN} from "../natives/ecmascript";
 
 export class ConstraintVarProducer<RVT extends RepresentativeVar | MergeRepresentativeVar = RepresentativeVar> {
 
@@ -74,14 +71,6 @@ export class ConstraintVarProducer<RVT extends RepresentativeVar | MergeRepresen
             isStringLiteral(exp) || // note: currently skipping string literals
             isUnaryExpression(exp) || isBinaryExpression(exp) || isUpdateExpression(exp))
             return undefined; // those expressions never evaluate to functions or objects and can safely be skipped
-        else if (isSuper(exp)) {
-            const cl = getClass(path);
-            if (!cl) {
-                this.f.warnUnsupported(exp, "Ignoring super in object expression"); // TODO: object expressions may have prototypes, e.g. __proto__
-                return undefined;
-            }
-            return this.extendsVar(cl);
-        }
         return this.nodeVar(exp); // other expressions are already canonical
     }
 
@@ -118,10 +107,18 @@ export class ConstraintVarProducer<RVT extends RepresentativeVar | MergeRepresen
     }
 
     /**
-     * Finds the constraint variable for an array value.
+     * Finds the constraint variable for the array's unknown entries.
      */
-    arrayValueVar(arr: ArrayToken): ArrayValueVar {
-        return this.a.canonicalizeVar(new ArrayValueVar(arr));
+    arrayUnknownVar(arr: ArrayToken): ObjectPropertyVar {
+        return this.objPropVar(arr, ARRAY_UNKNOWN);
+    }
+
+    /**
+     * Finds the summary constraint variable for the array.
+     * This variable contains the union of tokens in the array's known and unknown entries.
+     */
+    arrayAllVar(arr: ArrayToken): ObjectPropertyVar {
+        return this.objPropVar(arr, ARRAY_ALL);
     }
 
     /**
@@ -136,13 +133,6 @@ export class ConstraintVarProducer<RVT extends RepresentativeVar | MergeRepresen
      */
     returnVar(fun: Function): FunctionReturnVar {
         return this.a.canonicalizeVar(new FunctionReturnVar(fun));
-    }
-
-    /**
-     * Finds the constraint variable representing the super-class of the given class.
-     */
-    extendsVar(cl: Class): ClassExtendsVar {
-        return this.a.canonicalizeVar(new ClassExtendsVar(cl));
     }
 
     /**
@@ -170,8 +160,13 @@ export class ConstraintVarProducer<RVT extends RepresentativeVar | MergeRepresen
      * Finds the constraint variable representing the given AST node (or undefined).
      */
     nodeVar(n: Node): NodeVar
-    nodeVar(n: Node | undefined): NodeVar | undefined
     nodeVar(n: Node | undefined): NodeVar | undefined {
         return n !== undefined ? this.a.canonicalizeVar(new NodeVar(n)) : undefined;
+    }
+
+    ancestorsVar(t: Token): AncestorsVar {
+        if (t instanceof ObjectToken && this.f.widened.has(t))
+            t = this.a.canonicalizeToken(new PackageObjectToken(t.getPackageInfo()));
+        return this.a.canonicalizeVar(new AncestorsVar(t));
     }
 }

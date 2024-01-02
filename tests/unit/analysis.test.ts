@@ -1,5 +1,5 @@
 import assert from "assert";
-import {Node, blockStatement, functionExpression, identifier, traverse} from "@babel/types";
+import {Node, blockStatement, functionExpression, identifier, traverse, SourceLocation} from "@babel/types";
 import {UnknownAccessPath} from "../../src/analysis/accesspaths";
 import {ConstraintVar, IntermediateVar, ObjectPropertyVar} from "../../src/analysis/constraintvars";
 import {findEscapingObjects} from "../../src/analysis/escaping";
@@ -8,7 +8,6 @@ import Solver from "../../src/analysis/solver";
 import {AccessPathToken, FunctionToken, NativeObjectToken, ObjectToken, PackageObjectToken} from "../../src/analysis/tokens";
 import {options, resetOptions} from "../../src/options";
 import {JELLY_NODE_ID} from "../../src/parsing/extras";
-import {Location} from "../../src/misc/util";
 import {TokenListener} from "../../src/analysis/listeners";
 import {widenObjects} from "../../src/analysis/widening";
 
@@ -27,11 +26,11 @@ describe("tests/unit/analysis", () => {
         traverse(n, {
             enter(node: Node) {
                 (node as any)[JELLY_NODE_ID] ??= ++nextNodeID;
-                node.loc ??= <Location>{
+                node.loc ??= {
                     start: {line: nextNodeID, column: ++nextNodeID},
                     end: {line: nextNodeID, column: ++nextNodeID},
                     module: m,
-                };
+                } as unknown as SourceLocation;
             },
         });
         return n;
@@ -123,11 +122,11 @@ describe("tests/unit/analysis", () => {
             const {solver, a, f, redirect} = setup;
 
             const at = a.canonicalizeToken(new ObjectToken(param));
-            const ft = a.canonicalizeToken(new FunctionToken(fun0, m));
+            const ft = a.canonicalizeToken(new FunctionToken(fun0));
             expect(at).not.toBe(ft);
 
             const fn = jest.fn();
-            solver.addForAllPairsConstraint(vA, vB, TokenListener.AWAIT, param, fn);
+            solver.addForAllTokenPairsConstraint(vA, vB, TokenListener.AWAIT, param, "", fn);
             redirect(vB, vRep1);
             solver.addTokenConstraint(ft, vB);
             solver.addSubsetConstraint(vA, vRep2);
@@ -143,10 +142,10 @@ describe("tests/unit/analysis", () => {
             const {solver, a, f} = setup;
 
             const at = a.canonicalizeToken(new ObjectToken(param));
-            const ft = a.canonicalizeToken(new FunctionToken(fun0, m));
+            const ft = a.canonicalizeToken(new FunctionToken(fun0));
 
             const fn = jest.fn();
-            solver.addForAllPairsConstraint(vA, vA, TokenListener.AWAIT, param, fn);
+            solver.addForAllTokenPairsConstraint(vA, vA, TokenListener.AWAIT, param, "", fn);
             solver.addTokenConstraint(ft, vA);
             assert(f.isRepresentative(vA) && f.isRepresentative(vRep));
             solver.addSubsetEdge(vA, vRep, false);
@@ -161,7 +160,7 @@ describe("tests/unit/analysis", () => {
             const {solver, a, f, redirect} = setup;
 
             const ot = a.canonicalizeToken(new ObjectToken(param));
-            const ft = a.canonicalizeToken(new FunctionToken(fun0, m));
+            const ft = a.canonicalizeToken(new FunctionToken(fun0));
             const vA = f.varProducer.objPropVar(ot, "A");
             redirect(vA, vRep);
             solver.addTokenConstraint(ft, vRep);
@@ -192,7 +191,7 @@ describe("tests/unit/analysis", () => {
         test("module.exports = function", () => {
             const {solver, a, f, getTokens} = setup;
 
-            solver.addTokenConstraint(a.canonicalizeToken(new FunctionToken(fun1, m)), vExports);
+            solver.addTokenConstraint(a.canonicalizeToken(new FunctionToken(fun1)), vExports);
             expect([...f.vars]).toContain(vExports);
 
             const escaping = findEscapingObjects(m, solver);
@@ -204,7 +203,7 @@ describe("tests/unit/analysis", () => {
         test("maybeEscapingFromModule(function)", () => {
             const {solver, a, f, getTokens} = setup;
 
-            solver.addTokenConstraint(a.canonicalizeToken(new FunctionToken(fun1, m)), v);
+            solver.addTokenConstraint(a.canonicalizeToken(new FunctionToken(fun1)), v);
             f.registerEscapingFromModule(v);
 
             const escaping = findEscapingObjects(m, solver);
@@ -236,7 +235,7 @@ describe("tests/unit/analysis", () => {
             f.registerEscapingFromModule(v);
 
             const vA = f.varProducer.objPropVar(tObject, "A");
-            const tFunction = a.canonicalizeToken(new FunctionToken(fun1, m));
+            const tFunction = a.canonicalizeToken(new FunctionToken(fun1));
             solver.addTokenConstraint(tFunction, vA);
 
             expect(findEscapingObjects(m, solver)).toEqual(new Set([tObject]));
@@ -281,7 +280,7 @@ describe("tests/unit/analysis", () => {
             f.registerEscapingFromModule(v);
 
             const vA = f.varProducer.objPropVar(tObject, "A");
-            const tFunction = a.canonicalizeToken(new FunctionToken(fun1, m));
+            const tFunction = a.canonicalizeToken(new FunctionToken(fun1));
             solver.addTokenConstraint(tFunction, vA);
 
             const rep = f.varProducer.intermediateVar(param, "rep");
@@ -384,7 +383,7 @@ describe("tests/unit/analysis", () => {
 
             const opV = f.varProducer.objPropVar(ot, "A");
             const fn = jest.fn();
-            solver.addForAllConstraint(opV, TokenListener.AWAIT, param, fn);
+            solver.addForAllTokensConstraint(opV, TokenListener.AWAIT, param, fn);
 
             redirect(opV, vA);
             await solver.propagate(); // clear nodesWithNewEdges
@@ -394,6 +393,43 @@ describe("tests/unit/analysis", () => {
             expect(fn).not.toHaveBeenCalled();
             expect(f.postponedListenerCalls, "Token listener should be enqueued", {showMatcherMessage: false}).
                 toContainEqual([fn, pt]);
+        });
+
+        test("PackageObjectToken gets ancestor listeners", async () => {
+            const {solver, f} = setup;
+
+            const fn = jest.fn();
+            solver.addForAllAncestorsConstraint(ot, TokenListener.ASSIGN_ANCESTORS, param, "", fn);
+
+            expect(f.postponedListenerCalls, `Ancestor listener should be enqueued with ${ot}`, {showMatcherMessage: false}).
+                toEqual([[fn, ot]]);
+            await solver.propagate();
+
+            widenObjects(new Set([ot]), solver);
+
+            expect(f.postponedListenerCalls, `Ancestor listener should be enqueued with ${pt}`, {showMatcherMessage: false}).
+                toEqual([[fn, pt]]);
+        });
+
+        test("Ancestor listener triggers for widened ancestor", async () => {
+            const {solver, a} = setup;
+
+            const fn = jest.fn();
+            solver.addForAllAncestorsConstraint(ot, TokenListener.READ_ANCESTORS, param, "", fn);
+
+            await solver.propagate();
+            expect(fn).toHaveBeenLastCalledWith(ot);
+
+            const anc = a.canonicalizeToken(new ObjectToken(fun0));
+            solver.addInherits(ot, anc);
+
+            await solver.propagate();
+            expect(fn).toHaveBeenLastCalledWith(anc);
+
+            widenObjects(new Set([anc]), solver);
+
+            await solver.propagate();
+            expect(fn).toHaveBeenLastCalledWith(pt);
         });
     });
 });

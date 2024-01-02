@@ -1,10 +1,22 @@
 import {NodePath, PluginObj} from '@babel/core';
 import {TemplateBuilder} from '@babel/template';
 import {
+    addComment,
+    blockStatement,
+    BlockStatement,
+    callExpression,
+    ClassDeclaration,
+    ClassExpression,
+    ClassMethod,
+    classMethod,
+    expressionStatement,
     File,
     Identifier,
     identifier,
+    isCallExpression,
     isClassMethod,
+    isClassPrivateMethod,
+    isClassPrivateProperty,
     isClassProperty,
     isIdentifier,
     isImportSpecifier,
@@ -15,9 +27,15 @@ import {
     isObjectMethod,
     isObjectProperty,
     isOptionalMemberExpression,
+    isSuper,
     isTSExternalModuleReference,
     Node,
     Program,
+    restElement,
+    RestElement,
+    SourceLocation,
+    spreadElement,
+    super as _super,
     TSExportAssignment,
     TSImportEqualsDeclaration,
     variableDeclaration,
@@ -31,11 +49,11 @@ import {Location} from "../misc/util";
 import {ModuleInfo} from "../analysis/infos";
 
 /**
- * Replaces TypeScript "export =" and "import =" syntax.
+ * Replaces TypeScript "export =" and "import =" syntax and creates default constructors.
  * See https://babeljs.io/docs/en/babel-plugin-transform-typescript/#caveats
  * and https://www.typescriptlang.org/docs/handbook/modules.html#export--and-import--require
  */
-export function replaceTypeScriptImportExportAssignments({ template }: {template: TemplateBuilder<TSExportAssignment>}): PluginObj {
+export function replaceTypeScriptImportExportAssignmentsAndAddConstructors({ template }: {template: TemplateBuilder<TSExportAssignment>}): PluginObj {
     const moduleExportsDeclaration = template("module.exports = ASSIGNMENT;");
     const moduleImportsDeclaration = template("var ID = require(MODULE);");
     return {
@@ -54,9 +72,43 @@ export function replaceTypeScriptImportExportAssignments({ template }: {template
                     path.scope.registerDeclaration(path);
                 }
                 // TODO: handle other forms of TSImportEqualsDeclaration?
+            },
+            Class(path: NodePath<ClassExpression | ClassDeclaration>) {
+                for (const b of path.node.body.body)
+                    if ((isClassMethod(b) || isClassPrivateMethod(b)) && b.kind === "constructor")
+                        return;
+                let params: Array<Identifier | RestElement>, body: BlockStatement;
+                if (path.node.superClass) {
+                    params = [
+                        identifier("p1"),
+                        identifier("p2"),
+                        identifier("p3"),
+                        identifier("p4"),
+                        identifier("p5"),
+                        restElement(identifier("rest"))
+                    ];
+                    body = blockStatement([expressionStatement(callExpression(_super(), [
+                        identifier("p1"),
+                        identifier("p2"),
+                        identifier("p3"),
+                        identifier("p4"),
+                        identifier("p5"),
+                        spreadElement(identifier("rest"))
+                    ]))]);
+                } else {
+                    params = [];
+                    body = blockStatement([]);
+                }
+                const c = classMethod("constructor", identifier("constructor"), params, body);
+                addComment(body, "leading", "JELLY_DEFAULT");
+                path.get("body").unshiftContainer("body", c);
             }
         }
     };
+}
+
+export function isDummyConstructor(c: Node | undefined): boolean {
+    return isClassMethod(c) && c.kind === "constructor" && c.body.leadingComments?.[0].value == "JELLY_DEFAULT";
 }
 
 export const JELLY_NODE_ID = Symbol("JELLY_NODE_ID");
@@ -106,7 +158,7 @@ export function preprocessAst(ast: File, file: string, module: ModuleInfo, globa
                     assert(p.parentPath);
                     p = p.parentPath;
                 }
-                n.loc = {start: p?.node.loc?.start, end: p?.node.loc?.end, nodeIndex: (n as any)[JELLY_NODE_ID]} as Location; // see locationToString
+                n.loc = {start: p?.node.loc?.start, end: p?.node.loc?.end, nodeIndex: (n as any)[JELLY_NODE_ID]} as unknown as SourceLocation; // see locationToString
             }
 
             // set module (if not already set and not native)
@@ -114,17 +166,17 @@ export function preprocessAst(ast: File, file: string, module: ModuleInfo, globa
                 (n.loc as Location).module = module;
 
             // workarounds to match dyn.ts source locations
-            if (isClassMethod(n)) {
-                if (n.kind === "constructor") {
-                    // for constructors, use the class source location
-                    const cls = getClass(path);
-                    assert(cls);
-                    n.loc = cls.loc;
-                } else if (n.static) {
-                    // for static methods, use the identifier start location
-                    assert(n.loc && n.key.loc);
-                    n.loc.start = n.key.loc!.start;
-                }
+            if (((isClassMethod(n) || isClassPrivateMethod(n)) && n.kind === "constructor") ||
+                (isCallExpression(n) && isSuper(n.callee) && isDummyConstructor(path.findParent(p =>
+                    isClassMethod(p.node))?.node as ClassMethod | undefined))) {
+                // for constructors and artificial super calls, use the class source location
+                const cls = getClass(path);
+                assert(cls);
+                n.loc = cls.loc;
+            } else if ((isClassMethod(n) || isClassPrivateMethod(n) || isClassPrivateProperty(n)) && n.static) {
+                // for static methods and properties, use the identifier start location
+                assert(n.loc && n.key.loc);
+                n.loc.start = n.key.loc!.start;
             }
 
             // add bindings in global scope for identifiers with missing binding

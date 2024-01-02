@@ -52,6 +52,8 @@ export default class AnalysisDiagnostics {
 
     functionsWithZeroCallers: number = 0; // set when analysis is completed
 
+    reachableFunctions: number = 0; // set when analysis is completed
+
     unprocessedTokensSize: number = 0;
 
     fixpointRound: number = 0;
@@ -65,8 +67,6 @@ export default class AnalysisDiagnostics {
     pairListenerNotifications: number = 0;
 
     packageNeighborListenerNotifications: number = 0;
-
-    ancestorListenerNotifications: number = 0;
 
     arrayEntriesListenerNotifications: number = 0;
 
@@ -83,4 +83,8 @@ export default class AnalysisDiagnostics {
     totalListenerCallTime: number = 0;
     
     totalWideningTime: number = 0;
+
+    unhandledDynamicPropertyWrites: number = 0;
+
+    unhandledDynamicPropertyReads: number = 0;
 }

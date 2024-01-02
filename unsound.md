@@ -4,10 +4,7 @@
   - MemberExpression, OptionalMemberExpression
   - ObjectProperty, ObjectMethod, ClassProperty, ClassMethod, ClassPrivateMethod, ClassAccessorProperty, ClassPrivateProperty
 
-- dynamic require/import
-
-
-- prototype inheritance, super, extends (partly modeled...)
+- dynamic require/import (warnings)
 
 
 - ECMAScript standard library
@@ -28,7 +25,6 @@
 - Node.js standard library (callbacks, events)
 
 
-- PrivateName
 - BindExpression (nonstandard)
 
 
@@ -45,3 +41,5 @@
 - user-defined iterators (standard iterators are supported)
 - symbols (incl. "well-known symbols" like [Symbol.iterator] used for iterables)
 - events
+- exceptions
+- implicit toString/ValueOf calls

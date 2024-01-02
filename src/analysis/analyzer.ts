@@ -3,9 +3,9 @@ import {resolve} from "path";
 import logger, {writeStdOutIfActive} from "../misc/logger";
 import Solver, {AbortedException} from "./solver";
 import Timer, {TimeoutException} from "../misc/timer";
-import {addAll, getMapHybridSetSize, mapMapSize, percent} from "../misc/util";
+import {getMapHybridSetSize, mapMapSize, percent} from "../misc/util";
 import {visit} from "./astvisitor";
-import {ModuleInfo, PackageInfo} from "./infos";
+import {FunctionInfo, ModuleInfo, PackageInfo} from "./infos";
 import {options, resolveBaseDir} from "../options";
 import assert from "assert";
 import {widenObjects} from "./widening";
@@ -15,10 +15,10 @@ import {findEscapingObjects} from "./escaping";
 import {buildNatives} from "../natives/nativebuilder";
 import {AnalysisStateReporter} from "../output/analysisstatereporter";
 import {Operations} from "./operations";
-import {UnknownAccessPath} from "./accesspaths";
-import {Token} from "./tokens";
 import {preprocessAst} from "../parsing/extras";
 import {FragmentState} from "./fragmentstate";
+import {patchDynamics} from "../patching/patchdynamics";
+import {patchMethodCalls} from "../patching/patchmethodcalls";
 
 export async function analyzeFiles(files: Array<string>, solver: Solver) {
     const a = solver.globalState;
@@ -138,7 +138,12 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
 
                 // propagate tokens until fixpoint reached
                 await solver.propagate();
-                await patchDynamics(solver);
+
+                // patch heuristics
+                const p1 = patchDynamics(solver);
+                const p2 = patchMethodCalls(solver);
+                if (p1 || p2)
+                    await solver.propagate();
 
                 assert(a.pendingFiles.length === 0, "Unexpected module"); // (new modules shouldn't be discovered in the second phase)
                 solver.updateDiagnostics();
@@ -146,16 +151,16 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
         }
 
         const f = solver.fragmentState;
-        f.reportNonemptyUnhandledDynamicPropertyWrites();
-        f.reportNonemptyUnhandledDynamicPropertyReads();
+        f.reportUnhandledDynamicPropertyWrites();
+        f.reportUnhandledDynamicPropertyReads();
 
     } catch (ex) {
         solver.updateDiagnostics();
-        if (ex instanceof TimeoutException) {
+        if (ex instanceof TimeoutException)
             d.timeout = true;
-        } else if (ex instanceof AbortedException) {
+        else if (ex instanceof AbortedException)
             d.aborted = true;
-        } else
+        else
             throw ex;
     }
     d.time = timer.elapsed();
@@ -179,13 +184,15 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
         d.externalOnlyCalls = r.getZeroButExternalCalleeCalls();
         d.nativeOrExternalCalls = r.getZeroButNativeOrExternalCalleeCalls();
         d.functionsWithZeroCallers = r.getZeroCallerFunctions().size;
+        d.reachableFunctions = Array.from(r.getReachableModulesAndFunctions(r.getEntryModules())).filter(r => r instanceof FunctionInfo).length;
         if (logger.isInfoEnabled()) {
             logger.info(`Analyzed packages: ${d.packages}, modules: ${d.modules}, functions: ${a.functionInfos.size}, code size: ${Math.ceil(d.codeSize / 1024)}KB`);
             logger.info(`Call edges function->function: ${f.numberOfFunctionToFunctionEdges}, call->function: ${f.numberOfCallToFunctionEdges}`);
             const n = d.totalCallSites - d.callsWithNoCallee - d.nativeOnlyCalls - d.externalOnlyCalls - d.nativeOrExternalCalls;
             logger.info(`Calls with unique callee: ${d.callsWithUniqueCallee}/${n}${n > 0 ? ` (${percent(d.callsWithUniqueCallee / n)})` : ""}` +
                 ` (excluding ${d.callsWithNoCallee} zero-callee, ${d.nativeOnlyCalls} native-only, ${d.externalOnlyCalls} external-only and ${d.nativeOrExternalCalls} native-or-external-only)`)
-            logger.info(`Functions with zero callers: ${r.getZeroCallerFunctions().size}/${a.functionInfos.size}`);
+            logger.info(`Functions with zero callers: ${d.functionsWithZeroCallers}/${a.functionInfos.size}${a.functionInfos.size > 0 ? ` (${percent(d.functionsWithZeroCallers / a.functionInfos.size)})` : ""}, ` +
+                `reachable functions: ${d.reachableFunctions}/${a.functionInfos.size}${a.functionInfos.size > 0 ? ` (${percent(d.reachableFunctions / a.functionInfos.size)})` : ""}`);
             logger.info(`Analysis time: ${d.time}ms, memory usage: ${d.maxMemoryUsage}MB${!options.gc ? " (without --gc)" : ""}`);
             logger.info(`Analysis errors: ${d.errors}, warnings: ${d.warnings}${getMapHybridSetSize(f.warningsUnsupported) > 0 && !options.warningsUnsupported ? " (show all with --warnings-unsupported)" : ""}`);
             if (options.diagnostics) {
@@ -196,7 +203,6 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
                 logger.info(`Listeners (notifications) token: ${mapMapSize(f.tokenListeners)} (${d.tokenListenerNotifications}), ` +
                     `pair: ${mapMapSize(f.pairListeners1) + mapMapSize(f.pairListeners2)} (${d.pairListenerNotifications}), ` +
                     (options.readNeighbors ? `neighbor: ${mapMapSize(f.packageNeighborListeners)} (${d.packageNeighborListenerNotifications}), ` : "") +
-                    `ancestor: ${mapMapSize(f.ancestorListeners)} (${d.ancestorListenerNotifications}), ` +
                     `array: ${mapMapSize(f.arrayEntriesListeners)} (${d.arrayEntriesListenerNotifications}), ` +
                     `obj: ${mapMapSize(f.objectPropertiesListeners)} (${d.objectPropertiesListenerNotifications})`);
                 logger.info(`Canonicalize vars: ${a.canonicalConstraintVars.size} (${a.numberOfCanonicalizeVarCalls}), tokens: ${a.canonicalTokens.size} (${a.numberOfCanonicalizeTokenCalls}), access paths: ${a.canonicalAccessPaths.size} (${a.numberOfCanonicalizeAccessPathCalls})`);
@@ -206,64 +212,5 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
                     logger.info(`Cycle elimination time: ${d.totalCycleEliminationTime}ms, runs: ${d.totalCycleEliminationRuns}, nodes removed: ${f.redirections.size}`);
             }
         }
-    }
-}
-
-/**
- * Patches empty object property constraint variables that may be affected by dynamic property writes.
- */
-async function patchDynamics(solver: Solver) {
-    if (!options.patchDynamics)
-        return;
-    const f = solver.fragmentState;
-    const dyns = new Set<Token>();
-    for (const v of f.dynamicPropertyWrites)
-        addAll(f.getTokens(f.getRepresentative(v)), dyns);
-    // constraint: for all E.p (or E[..]) where ⟦E.p⟧ (or ⟦E[..]⟧) is empty and ⟦E⟧ contains a token that is base of a dynamic property write
-    let count = 0;
-    const r: typeof f.maybeEmptyPropertyReads = [];
-    for (const e of f.maybeEmptyPropertyReads) {
-        const {result, base, pck/*, prop*/} = e;
-        const bs = f.getTokens(f.getRepresentative(base));
-        const [size] = f.getTokensSize(f.getRepresentative(result));
-        if (size === 0) {
-            let dpw = false;
-            for (const t of bs)
-                if (dyns.has(t)) {
-                    dpw = true; // base has a token that is base of a dynamic property write
-                    break;
-                }
-            if (dpw) {
-                if (logger.isDebugEnabled())
-                    logger.debug(`Empty object property read ${result} with dynamic write to base object ${base}`);
-
-                // constraint: ...: @Unknown ∈ ⟦E⟧ and k ∈ ⟦E.p⟧ (or ⟦E[..]⟧) where k is the package containing the property read operation
-                solver.addAccessPath(UnknownAccessPath.instance, base);
-                solver.addTokenConstraint(pck, result); // TODO: omit?
-
-                // TODO: enable extra patching for exports properties?
-                /*
-                // constraint: ...: ⟦%exports[m].p⟧ ⊆ ⟦E⟧ for each module m in the current package or a neighbor package
-                if (prop !== undefined)
-                    for (const p of [pck.packageInfo, ...f.packageNeighbors.get(pck.packageInfo) ?? []]) {
-                        for (const m of p.modules.values()) {
-                            const t = f.a.canonicalizeToken(new NativeObjectToken("exports", m));
-                            const v = f.getRepresentative(solver.varProducer.objPropVar(t, prop));
-                            if (f.vars.has(v))
-                                solver.addSubsetConstraint(v, result);
-                        }
-                    }
-                 */
-
-                count++;
-            } else
-                r.push(e); // keep only the property reads that are still empty
-        }
-    }
-    f.maybeEmptyPropertyReads = r;
-    if (count > 0) {
-        if (logger.isVerboseEnabled())
-            logger.verbose(`${count} empty object property read${count === 1 ? "" : "s"} patched, propagating again`);
-        await solver.propagate();
     }
 }

@@ -1,6 +1,7 @@
-import {Class, Function, isIdentifier, Node} from "@babel/types";
+import {Function, isIdentifier, Node} from "@babel/types";
 import {nodeToString, locationToStringWithFileAndEnd} from "../misc/util";
 import {
+    AccessPathToken,
     AllocationSiteToken,
     ArrayToken,
     FunctionToken,
@@ -11,6 +12,22 @@ import {
 import {ModuleInfo, PackageInfo} from "./infos";
 import {IDENTIFIER_KIND} from "./astvisitor";
 import Solver from "./solver";
+import assert from "assert";
+
+function getTokenParent(obj: Token): Node | PackageInfo | ModuleInfo | undefined {
+    if (obj instanceof AllocationSiteToken)
+        return obj.allocSite;
+    else if (obj instanceof FunctionToken)
+        return obj.fun;
+    else if (obj instanceof NativeObjectToken)
+        return obj.moduleInfo;
+    else if (obj instanceof PackageObjectToken)
+        return obj.packageInfo;
+    else {
+        assert(obj instanceof AccessPathToken);
+        return undefined;
+    }
+}
 
 /**
  * A constraint variable.
@@ -62,8 +79,8 @@ export type AccessorType = "get" | "set" | "normal";
 
 export type ObjectPropertyVarObj = AllocationSiteToken | FunctionToken | NativeObjectToken | PackageObjectToken;
 
-export function isObjectPropertyVarObj(t: Token | undefined): t is ObjectPropertyVarObj {
-    return t instanceof AllocationSiteToken || t instanceof FunctionToken || t instanceof PackageObjectToken || t instanceof NativeObjectToken;
+export function isObjectPropertyVarObj(t: Token): t is ObjectPropertyVarObj {
+    return !(t instanceof AccessPathToken);
 }
 
 /**
@@ -95,28 +112,7 @@ export class ObjectPropertyVar extends ConstraintVar {
     }
 
     getParent() {
-        return this.obj instanceof AllocationSiteToken ? this.obj.allocSite :
-            this.obj instanceof FunctionToken ? this.obj.fun :
-                this.obj instanceof NativeObjectToken ? this.obj.moduleInfo :
-                    this.obj.packageInfo;
-    }
-}
-
-/**
- * A constraint variable for an unknown array entry.
- */
-export class ArrayValueVar extends ConstraintVar {
-
-    constructor(readonly array: ArrayToken) {
-        super();
-    }
-
-    toString(): string {
-        return `${this.array}.*`;
-    }
-
-    getParent(): Node {
-        return this.array.allocSite;
+        return getTokenParent(this.obj);
     }
 }
 
@@ -130,7 +126,7 @@ export class FunctionReturnVar extends ConstraintVar {
     }
 
     toString() {
-        return `Return[${locationToStringWithFileAndEnd(this.fun.loc, true)}]`
+        return `Return[${locationToStringWithFileAndEnd(this.fun.loc, true)}]`;
     }
 
     getParent(): Node {
@@ -175,24 +171,6 @@ export class ArgumentsVar extends ConstraintVar {
 }
 
 /**
- * A constraint variable for the super-class of a class.
- */
-export class ClassExtendsVar extends ConstraintVar {
-
-    constructor(readonly cl: Class) {
-        super();
-    }
-
-    toString() {
-        return `Extends[${locationToStringWithFileAndEnd(this.cl.loc, true)}]`
-    }
-
-    getParent(): Node {
-        return this.cl;
-    }
-}
-
-/**
  * A constraint variable for an intermediate result.
  */
 export class IntermediateVar extends ConstraintVar {
@@ -205,10 +183,28 @@ export class IntermediateVar extends ConstraintVar {
     }
 
     toString() {
-        return `#${this.label}[${locationToStringWithFileAndEnd(this.node.loc, true)}]`
+        return `#${this.label}[${locationToStringWithFileAndEnd(this.node.loc, true)}]`;
     }
 
     getParent(): Node {
         return this.node;
+    }
+}
+
+/**
+ * A constraint variable for the ancestors in the prototype chain of a token.
+ */
+export class AncestorsVar extends ConstraintVar {
+
+    constructor(readonly t: Token) {
+        super();
+    }
+
+    toString() {
+        return `Ancestors(${this.t})`;
+    }
+
+    getParent() {
+        return getTokenParent(this.t);
     }
 }

@@ -72,35 +72,58 @@ export class AnalysisStateReporter {
     /**
      * Saves the call graph to a JSON file using the format defined in callgraph.d.ts.
      */
-    saveCallGraph(outfile: string, files: Array<string>) {
+    saveCallGraph(outfile: string, files: Array<string>) { // TODO: use callGraphToJSON?
         const fd = fs.openSync(outfile, "w");
         fs.writeSync(fd, `{\n "time": "${new Date().toUTCString()}",\n`);
         fs.writeSync(fd, ` "entries": [`);
         let first = true;
         for (const file of files) {
-            fs.writeSync(fd, `${first ? "" : ","}\n  ${JSON.stringify(relative(options.basedir,resolve(options.basedir, file)))}`);
+            fs.writeSync(fd, `${first ? "" : ","}\n  ${JSON.stringify(relative(options.basedir, resolve(options.basedir, file)))}`);
             first = false;
         }
-        fs.writeSync(fd, `\n ],\n "files": [`);
+        fs.writeSync(fd, `\n ],\n`);
+        if (options.ignoreDependencies)
+            fs.writeSync(fd, ` "ignoreDependencies": true,\n`);
+        if (options.includePackages) {
+            fs.writeSync(fd, ` "included": [`);
+            first = true;
+            for (const name of options.includePackages) {
+                fs.writeSync(fd, `${first ? "" : ","}\n  ${JSON.stringify(name)}`);
+                first = false;
+            }
+            fs.writeSync(fd, `\n ],\n`);
+        }
+        if (options.excludePackages) {
+            fs.writeSync(fd, ` "excluded": [`);
+            first = true;
+            for (const name of options.excludePackages) {
+                fs.writeSync(fd, `${first ? "" : ","}\n  ${JSON.stringify(name)}`);
+                first = false;
+            }
+            fs.writeSync(fd, `\n ],\n`);
+        }
+        fs.writeSync(fd, ` "files": [`);
         const fileIndices = new Map<ModuleInfo, number>();
         first = true;
-        for (const m of this.a.moduleInfos.values()) {
-            fileIndices.set(m, fileIndices.size);
-            fs.writeSync(fd, `${first ? "" : ","}\n  ${JSON.stringify(relative(options.basedir, m.getPath()))}`);
-            first = false;
-        }
+        for (const m of this.a.moduleInfos.values())
+            if (m.node) {
+                fileIndices.set(m, fileIndices.size);
+                fs.writeSync(fd, `${first ? "" : ","}\n  ${JSON.stringify(relative(options.basedir, m.getPath()))}`);
+                first = false;
+            }
         fs.writeSync(fd, `\n ],\n "functions": {`);
         const functionIndices = new Map<FunctionInfo | ModuleInfo, number>();
         first = true;
-        for (const fun of [...this.a.functionInfos.values(), ...this.a.moduleInfos.values()]) {
-            const funIndex = functionIndices.size;
-            functionIndices.set(fun, funIndex);
-            const fileIndex = fileIndices.get(fun instanceof ModuleInfo ? fun : fun.moduleInfo);
-            if (fileIndex === undefined)
-                assert.fail(`File index not found for ${fun}`);
-            fs.writeSync(fd, `${first ? "" : ","}\n  "${funIndex}": ${JSON.stringify(this.makeLocStr(fileIndex, fun.node?.loc))}`);
-            first = false;
-        }
+        for (const fun of [...this.a.functionInfos.values(), ...this.a.moduleInfos.values()])
+            if (fun.node) {
+                const funIndex = functionIndices.size;
+                functionIndices.set(fun, funIndex);
+                const fileIndex = fileIndices.get(fun instanceof ModuleInfo ? fun : fun.moduleInfo);
+                if (fileIndex === undefined)
+                    assert.fail(`File index not found for ${fun}`);
+                fs.writeSync(fd, `${first ? "" : ","}\n  "${funIndex}": ${JSON.stringify(this.makeLocStr(fileIndex, fun.node?.loc))}`);
+                first = false;
+            }
         fs.writeSync(fd, `\n },\n "calls": {`);
         const callIndices = new Map<Node, number>();
         first = true;
@@ -118,30 +141,31 @@ export class AnalysisStateReporter {
         fs.writeSync(fd, `\n },\n "fun2fun": [`);
         first = true;
         for (const [caller, callees] of [...this.f.functionToFunction, ...(options.callgraphRequire ? this.f.requireGraph : [])])
-            for (const callee of callees) {
-                const callerIndex = functionIndices.get(caller);
-                if (callerIndex === undefined)
-                    assert.fail(`Function index not found for ${caller}`);
-                const calleeIndex = functionIndices.get(callee);
-                if (calleeIndex === undefined)
-                    assert.fail(`Function index not found for ${callee}`);
-                fs.writeSync(fd, `${first ? "\n  " : ", "}[${callerIndex}, ${calleeIndex}]`);
-                first = false;
-            }
+            if (caller.node)
+                for (const callee of callees)
+                    if (callee.node) {
+                        const callerIndex = functionIndices.get(caller);
+                        if (callerIndex === undefined)
+                            assert.fail(`Function index not found for ${caller}`);
+                        const calleeIndex = functionIndices.get(callee);
+                        if (calleeIndex === undefined)
+                            assert.fail(`Function index not found for ${callee}`);
+                        fs.writeSync(fd, `${first ? "\n  " : ", "}[${callerIndex}, ${calleeIndex}]`);
+                        first = false;
+                    }
         fs.writeSync(fd, `${first ? "" : "\n "}],\n "call2fun": [`);
         first = true;
         for (const [call, callIndex] of callIndices) {
             const funs = this.f.callToFunction.get(call) || [];
             const mods = this.f.callToModule.get(call) || [];
-            for (const callee of [...funs, ...mods]) {
-                if (callee instanceof DummyModuleInfo)
-                    continue; // skipping require/import edges to modules that haven't been analyzed
-                const calleeIndex = functionIndices.get(callee);
-                if (calleeIndex === undefined)
-                    assert.fail(`Function index not found for ${callee}`);
-                fs.writeSync(fd, `${first ? "\n  " : ", "}[${callIndex}, ${calleeIndex}]`);
-                first = false;
-            }
+            for (const callee of [...funs, ...mods])
+                if (!(callee instanceof DummyModuleInfo) && callee.node) { // skipping require/import edges to modules that haven't been analyzed
+                    const calleeIndex = functionIndices.get(callee);
+                    if (calleeIndex === undefined)
+                        assert.fail(`Function index not found for ${callee}`);
+                    fs.writeSync(fd, `${first ? "\n  " : ", "}[${callIndex}, ${calleeIndex}]`);
+                    first = false;
+                }
         }
         fs.writeSync(fd, `${first ? "" : "\n "}],\n "ignore": [`);
         first = true;
@@ -168,19 +192,21 @@ export class AnalysisStateReporter {
             fun2fun: Edges = [],
             call2fun: Edges = [];
         const fileIndices = new Map<ModuleInfo, number>();
-        for (const m of this.a.moduleInfos.values()) {
-            fileIndices.set(m, fileIndices.size);
-            files.push(relative(options.basedir, m.getPath()));
-        }
+        for (const m of this.a.moduleInfos.values())
+            if (m.node) {
+                fileIndices.set(m, fileIndices.size);
+                files.push(relative(options.basedir, m.getPath()));
+            }
         const functionIndices = new Map<FunctionInfo | ModuleInfo, number>();
-        for (const fun of [...this.a.functionInfos.values(), ...this.a.moduleInfos.values()]) {
-            const funIndex = functions.length;
-            functionIndices.set(fun, funIndex);
-            const fileIndex = fileIndices.get(fun instanceof ModuleInfo ? fun : fun.moduleInfo);
-            if (fileIndex === undefined)
-                assert.fail(`File index not found for ${fun}`);
-            functions.push(this.makeLocStr(fileIndex, fun.node?.loc));
-        }
+        for (const fun of [...this.a.functionInfos.values(), ...this.a.moduleInfos.values()])
+            if (fun.node) {
+                const funIndex = functions.length;
+                functionIndices.set(fun, funIndex);
+                const fileIndex = fileIndices.get(fun instanceof ModuleInfo ? fun : fun.moduleInfo);
+                if (fileIndex === undefined)
+                    assert.fail(`File index not found for ${fun}`);
+                functions.push(this.makeLocStr(fileIndex, fun.node?.loc));
+            }
         const callIndices = new Map<Node, number>();
         for (const call of this.f.callLocations) {
             const m = (call.loc as Location).module;
@@ -193,31 +219,34 @@ export class AnalysisStateReporter {
             calls.push(this.makeLocStr(fileIndex, call.loc));
         }
         for (const [caller, callees] of [...this.f.functionToFunction, ...(options.callgraphRequire ? this.f.requireGraph : [])])
-            for (const callee of callees) {
-                const callerIndex = functionIndices.get(caller);
-                if (callerIndex === undefined)
-                    assert.fail(`Function index not found for ${caller}`);
-                const calleeIndex = functionIndices.get(callee);
-                if (calleeIndex === undefined)
-                    assert.fail(`Function index not found for ${callee}`);
-                fun2fun.push([callerIndex, calleeIndex]);
-            }
+            if (caller.node)
+                for (const callee of callees)
+                    if (callee.node) {
+                        const callerIndex = functionIndices.get(caller);
+                        if (callerIndex === undefined)
+                            assert.fail(`Function index not found for ${caller}`);
+                        const calleeIndex = functionIndices.get(callee);
+                        if (calleeIndex === undefined)
+                            assert.fail(`Function index not found for ${callee}`);
+                        fun2fun.push([callerIndex, calleeIndex]);
+                    }
         for (const [call, callIndex] of callIndices) {
             const funs = this.f.callToFunction.get(call) || [];
             const mods = this.f.callToModule.get(call) || [];
-            for (const callee of [...funs, ...mods]) {
-                if (callee instanceof DummyModuleInfo)
-                    continue; // skipping require/import edges to modules that haven't been analyzed
-                const calleeIndex = functionIndices.get(callee);
-                if (calleeIndex === undefined)
-                    assert.fail(`Function index not found for ${callee}`);
-                call2fun.push([callIndex, calleeIndex]);
-            }
+            for (const callee of [...funs, ...mods])
+                if (!(callee instanceof DummyModuleInfo) && callee.node) { // skipping require/import edges to modules that haven't been analyzed
+                    const calleeIndex = functionIndices.get(callee);
+                    if (calleeIndex === undefined)
+                        assert.fail(`Function index not found for ${callee}`);
+                    call2fun.push([callIndex, calleeIndex]);
+                }
         }
-
         return {
             time: new Date().toUTCString(),
             entries: ifiles.map(file => relative(options.basedir, resolve(options.basedir, file))),
+            ignoreDependencies: options.ignoreDependencies,
+            includePackages: options.includePackages,
+            excludePackages: options.excludePackages,
             files,
             functions,
             calls,
@@ -230,6 +259,17 @@ export class AnalysisStateReporter {
                 return this.makeLocStr(fileIndex, n.loc);
             }),
         };
+    }
+
+    /**
+     * Reports the call graph (call sites -> functions).
+     */
+    reportCallGraph() {
+        logger.info("Call graph:");
+        for (const [src, dsts] of this.f.callToFunctionOrModule)
+            for (const dst of dsts)
+                if (dst instanceof FunctionInfo)
+                    logger.info(`  ${locationToStringWithFileAndEnd(src.loc)} -> ${locationToStringWithFile(dst.node.loc)}`);
     }
 
     /**
@@ -374,6 +414,34 @@ export class AnalysisStateReporter {
     reportZeroCallerFunctions(funs: Set<FunctionInfo>) {
         for (const f of funs)
             logger.info(`Function with zero callers at ${f}`);
+    }
+
+    /**
+     * Returns the entry modules.
+     */
+    getEntryModules(): Set<ModuleInfo> {
+        return new Set(Array.from(this.a.moduleInfos.values()).filter(m => m.isEntry));
+    }
+
+    /**
+     * Returns the modules and functions that are reachable from the given entries.
+     */
+    getReachableModulesAndFunctions(entries: Set<FunctionInfo | ModuleInfo>): Set<FunctionInfo | ModuleInfo> {
+        const res = new Set<FunctionInfo | ModuleInfo>(entries);
+        const w = Array.from(entries);
+        while (w.length > 0) {
+            const f = w.pop()!;
+            for (const g of [...this.f.functionToFunction.get(f) ?? [], ...this.f.requireGraph.get(f) ?? []]) {
+                if (!res.has(g)) {
+                    res.add(g);
+                    w.push(g);
+                    if (logger.isVerboseEnabled())
+                        logger.verbose(`${g instanceof FunctionInfo ? "Function" : "Module"} ${g} is reachable`);
+                }
+
+            }
+        }
+        return res;
     }
 
     /**

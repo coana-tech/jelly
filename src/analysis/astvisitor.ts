@@ -6,6 +6,7 @@ import {
     AssignmentPattern,
     AwaitExpression,
     CallExpression,
+    Class,
     ClassAccessorProperty,
     ClassDeclaration,
     ClassExpression,
@@ -28,7 +29,9 @@ import {
     isArrowFunctionExpression,
     isAssignmentExpression,
     isAssignmentPattern,
+    isCallExpression,
     isClassAccessorProperty,
+    isClassDeclaration,
     isClassExpression,
     isClassMethod,
     isClassPrivateMethod,
@@ -40,6 +43,7 @@ import {
     isExportDefaultSpecifier,
     isExportNamedDeclaration,
     isExpression,
+    isFunction,
     isFunctionDeclaration,
     isFunctionExpression,
     isIdentifier,
@@ -52,6 +56,7 @@ import {
     isPattern,
     isRestElement,
     isSpreadElement,
+    isStaticBlock,
     isVariableDeclaration,
     JSXElement,
     JSXMemberExpression,
@@ -93,7 +98,7 @@ import {locationToStringWithFile, mapArrayAdd} from "../misc/util";
 import assert from "assert";
 import {options} from "../options";
 import {ComponentAccessPath, PropertyAccessPath, UnknownAccessPath} from "./accesspaths";
-import {ConstraintVar} from "./constraintvars";
+import {ConstraintVar, isObjectPropertyVarObj} from "./constraintvars";
 import {
     getBaseAndProperty,
     getClass,
@@ -106,6 +111,7 @@ import {
 import {
     ASYNC_GENERATOR_PROTOTYPE_NEXT,
     GENERATOR_PROTOTYPE_NEXT,
+    INTERNAL_PROTOTYPE,
     PROMISE_FULFILLED_VALUES
 } from "../natives/ecmascript";
 import {Operations} from "./operations";
@@ -119,6 +125,7 @@ export function visit(ast: File, op: Operations) {
     const a = solver.globalState;
     const f = solver.fragmentState; // (don't use in callbacks)
     const vp = f.varProducer; // (don't use in callbacks)
+    const class2constructor = new Map<Class, ClassMethod>();
 
     // traverse the AST and extend the analysis result with information about the current module
     if (logger.isVerboseEnabled())
@@ -130,22 +137,89 @@ export function visit(ast: File, op: Operations) {
             // this
             f.registerThis(path);
 
-            // constraint: t ∈ ⟦this⟧ where t denotes the package
-            solver.addTokenConstraint(op.packageObjectToken, vp.nodeVar(path.node));
+            if (options.newobj) {
 
-            const fun = path.getFunctionParent();
-            if (fun) {
+                const encl = path.findParent((p: NodePath) =>
+                    isFunctionDeclaration(p.node) || isFunctionExpression(p.node) || isObjectMethod(p.node) ||
+                    isClassMethod(p.node) || isClassPrivateMethod(p.node) ||
+                    isStaticBlock(p.node) || isClassProperty(p.node) || isClassPrivateProperty(p.node)
+                );
+                if (encl) {
+                    if (isFunction(encl.node)) {
 
-                // constraint: ⟦this_f⟧ ⊆ ⟦this⟧ where f is the enclosing function
-                solver.addSubsetConstraint(vp.thisVar(fun.node), vp.nodeVar(path.node));
+                        // constraint: ⟦this_f⟧ ⊆ ⟦this⟧ where f is the enclosing function (excluding arrow functions)
+                        solver.addSubsetConstraint(vp.thisVar(encl.node), vp.nodeVar(path.node));
+
+                    } else {
+                        const cls = encl.parentPath?.parentPath?.node as Class;
+                        assert(cls);
+                        const constr = class2constructor.get(cls);
+                        assert(constr);
+
+                        if (isStaticBlock(encl.node) || ((isClassProperty(encl.node) || isClassPrivateProperty(encl.node)) && encl.node.static))
+                            // constraint: c ∈ ⟦this⟧ where c is the constructor of the enclosing class
+                            solver.addTokenConstraint(op.newFunctionToken(constr), vp.nodeVar(path.node));
+                        else
+                            // constraint: ⟦this_c⟧ ⊆ ⟦this⟧ where c is the constructor of the enclosing class
+                            solver.addSubsetConstraint(vp.thisVar(constr), vp.nodeVar(path.node));
+                    }
+                } else {
+
+                    // constraint %globalThis ∈ ⟦this⟧
+                    solver.addTokenConstraint(op.globalSpecialNatives.get("globalThis")!, vp.nodeVar(path.node));
+                }
             } else {
 
-                // constraint %globalThis ∈ ⟦this⟧
-                solver.addTokenConstraint(op.globalSpecialNatives.get("globalThis")!, vp.nodeVar(path.node));
+                // constraint: t ∈ ⟦this⟧ where t denotes the package
+                solver.addTokenConstraint(op.packageObjectToken, vp.nodeVar(path.node));
+
+                const fun = path.getFunctionParent();
+                if (fun) {
+
+                    // constraint: ⟦this_f⟧ ⊆ ⟦this⟧ where f is the enclosing function
+                    solver.addSubsetConstraint(vp.thisVar(fun.node), vp.nodeVar(path.node));
+                } else {
+
+                    // constraint %globalThis ∈ ⟦this⟧
+                    solver.addTokenConstraint(op.globalSpecialNatives.get("globalThis")!, vp.nodeVar(path.node));
+                }
             }
+
+            // FIXME: the 'this' value in the computed static field names is the 'this' surrounding the class definition
 
             // constraint: @Unknown ∈ ⟦this⟧
             solver.addAccessPath(UnknownAccessPath.instance, vp.nodeVar(path.node)); // TODO: omit this constraint in certain situations?
+        },
+
+        Super(path: NodePath<Super>) {
+
+            // super
+            const encl = path.findParent((p: NodePath) =>
+                isObjectMethod(p.node) || isClassMethod(p.node) || isClassPrivateMethod(p.node) ||
+                isStaticBlock(p.node) || isClassProperty(p.node) || isClassPrivateProperty(p.node)) as
+                NodePath<ObjectMethod | ClassMethod | ClassPrivateMethod | StaticBlock | ClassProperty | ClassPrivateProperty> | null;
+            assert(encl);
+            let src;
+            if (isObjectMethod(encl.node)) { // in object expression
+                // super ~ this.[[Prototype]]
+                src = op.newObjectToken(encl.parent);
+            } else {
+                const cls = getClass(path);
+                assert(cls);
+                const constr = class2constructor.get(cls);
+                assert(constr);
+                if (isCallExpression(path.parent) ||
+                    isStaticBlock(encl.node) ||
+                    ((isClassMethod(encl.node) || isClassPrivateMethod(encl.node) || isClassProperty(encl.node) || isClassPrivateProperty(encl.node)) &&
+                        encl.node.static)) { // in super-constructor call, static method, static field initializer or static block
+                    // super ~ ct.[[Prototype]] where ct is the constructor of the enclosing class
+                    src = op.newFunctionToken(constr);
+                } else { // in constructor or non-static method
+                    // super ~ pt.[[Prototype]] where pt is the prototype object of the constructor of the enclosing class
+                    src = op.newPrototypeToken(constr);
+                }
+            }
+            solver.addSubsetConstraint(vp.objPropVar(src, INTERNAL_PROTOTYPE()), vp.nodeVar(path.node));
         },
 
         Identifier(path: NodePath<Identifier>) {
@@ -213,7 +287,7 @@ export function visit(ast: File, op: Operations) {
 
                 // record that a function/method/constructor/getter/setter has been reached, connect to its enclosing function or module
                 const fun = path.node;
-                let cls;
+                let cls: Class | undefined;
                 if (isClassMethod(fun) && fun.kind === "constructor")
                     cls = getClass(path);
                 const name = isFunctionDeclaration(path.node) || isFunctionExpression(path.node) ? path.node.id?.name :
@@ -225,7 +299,7 @@ export function visit(ast: File, op: Operations) {
                     logger.verbose(`Reached function ${msg} at ${locationToStringWithFile(fun.loc)}`);
                 a.registerFunctionInfo(op.file, path, name, fun);
                 if (!name && !anon)
-                    f.warnUnsupported(fun, `Computed ${isFunctionDeclaration(path.node) || isFunctionExpression(path.node) ? "function" : "method"} name`); // TODO: handle functions/methods with unknown name?
+                    f.warnUnsupported(fun, `Dynamic ${isFunctionDeclaration(path.node) || isFunctionExpression(path.node) ? "function" : "method"} name`); // TODO: handle functions/methods with unknown name?
 
                 // process destructuring for parameters and register identifier parameters
                 for (const param of fun.params) {
@@ -234,6 +308,25 @@ export function visit(ast: File, op: Operations) {
                         f.registerFunctionParameter(paramVar, path.node);
                     else
                         op.assign(paramVar, param, path);
+                }
+
+                if (options.newobj) {
+
+                    if (isFunctionDeclaration(path.node) || isFunctionExpression(path.node) || isClassMethod(path.node) || isClassPrivateMethod(path.node)) {
+                        // create prototype object
+                        const pt = op.newPrototypeToken(path.node);
+                        const ft = op.newFunctionToken(path.node);
+                        solver.addTokenConstraint(pt, vp.objPropVar(ft, "prototype"));
+                        solver.addTokenConstraint(ft, vp.objPropVar(pt, "constructor"));
+                    }
+
+                    // if constructor for non-abstract class, make sure there is an instance
+                    if (cls && !(isClassDeclaration(cls) && cls.abstract)) {
+                        const obj = op.newObjectToken(fun);
+                        const proto = op.newPrototypeToken(fun);
+                        solver.addTokenConstraint(obj, vp.thisVar(fun));
+                        solver.addInherits(obj, proto);
+                    }
                 }
 
                 if (fun.generator) {
@@ -390,7 +483,7 @@ export function visit(ast: File, op: Operations) {
             }
         },
 
-        Property: { // ObjectProperty | ClassProperty | ClassAccessorProperty | ClassPrivateProperty
+        Property: {
             exit(path: NodePath<ObjectProperty | ClassProperty | ClassAccessorProperty | ClassPrivateProperty>) {
                 if (isPattern(path.parent))
                     return; // pattern properties are handled at assign
@@ -402,32 +495,64 @@ export function visit(ast: File, op: Operations) {
                         if (!isExpression(path.node.value))
                             assert.fail(`Unexpected Property value type ${path.node.value?.type} at ${locationToStringWithFile(path.node.loc)}`);
 
-                        // {..., p: E, ...} or class... {...; p = E; ...} (static or non-static, private or public)
-                        const rightvar = op.expVar(path.node.value, path);
-                        let dst;
-                        if (options.alloc && isObjectProperty(path.node)) {
-                            // constraint: ⟦E⟧ ⊆ ⟦i.p⟧ where i is the object literal
-                            dst = vp.objPropVar(a.canonicalizeToken(new ObjectToken(path.parentPath.node)), key);
-                        } else if (options.alloc && (isClassProperty(path.node) || isClassAccessorProperty(path.node) || isClassPrivateProperty(path.node)) && path.node.static) {
-                            // constraint: ⟦E⟧ ⊆ ⟦c.p⟧ where c is the class
-                            const cls = getClass(path);
-                            assert(cls);
-                            dst = vp.objPropVar(a.canonicalizeToken(new ClassToken(cls)), key);
+                        if (options.newobj) {
+
+                            // {..., p: E, ...} or class... {...; p = E; ...} (static or non-static, private or public)
+                            const rightvar = op.expVar(path.node.value, path);
+                            if (rightvar)
+                                if (isObjectProperty(path.node)) {
+                                    // constraint: ⟦E⟧ ⊆ ⟦i.p⟧ where i is the object literal
+                                    const dst = vp.objPropVar(op.newObjectToken(path.parentPath.node), key);
+                                    solver.addSubsetConstraint(rightvar, dst);
+                                } else {
+                                    const cls = getClass(path);
+                                    assert(cls);
+                                    const constr = class2constructor.get(cls);
+                                    assert(constr);
+                                    if (path.node.static) {
+                                        // constraint: ⟦E⟧ ⊆ ⟦c.p⟧ where c is the constructor function
+                                        const t = op.newFunctionToken(constr);
+                                        const dst = vp.objPropVar(t, key);
+                                        solver.addSubsetConstraint(rightvar, dst);
+                                    } else {
+                                        // constraint: ∀ t ∈ ⟦this_c⟧: ⟦E⟧ ⊆ ⟦t.p⟧ where c is the constructor function
+                                        solver.addForAllTokensConstraint(vp.thisVar(constr), TokenListener.CLASS_FIELD, path.node, (t: Token) => {
+                                            if (isObjectPropertyVarObj(t)) {
+                                                const dst = vp.objPropVar(t, key);
+                                                solver.addSubsetConstraint(rightvar, dst);
+                                            }
+                                        });
+                                    }
+                                }
+
                         } else {
-                            // constraint: ⟦E⟧ ⊆ ⟦k.p⟧ where k is the current package
-                            dst = vp.packagePropVar(op.file, key);
+
+                            // {..., p: E, ...} or class... {...; p = E; ...} (static or non-static, private or public)
+                            const rightvar = op.expVar(path.node.value, path);
+                            let dst;
+                            if (options.alloc && isObjectProperty(path.node)) {
+                                // constraint: ⟦E⟧ ⊆ ⟦i.p⟧ where i is the object literal
+                                dst = vp.objPropVar(a.canonicalizeToken(new ObjectToken(path.parentPath.node)), key);
+                            } else if (options.alloc && (isClassProperty(path.node) || isClassAccessorProperty(path.node) || isClassPrivateProperty(path.node)) && path.node.static) {
+                                // constraint: ⟦E⟧ ⊆ ⟦c.p⟧ where c is the class
+                                const cls = getClass(path);
+                                assert(cls);
+                                dst = vp.objPropVar(a.canonicalizeToken(new ClassToken(cls)), key);
+                            } else {
+                                // constraint: ⟦E⟧ ⊆ ⟦k.p⟧ where k is the current package
+                                dst = vp.packagePropVar(op.file, key);
+                            }
+                            solver.addSubsetConstraint(rightvar, dst);
                         }
-                        solver.addSubsetConstraint(rightvar, dst);
-                        // TODO: special treatment for ClassPrivateProperty? static properties?
                     }
                 } else
-                    f.warnUnsupported(path.node, "Computed property name"); // TODO: nontrivial computed property name
-                if (isClassProperty(path.node)) // dyn.ts treats class property initializers as functions
+                    f.warnUnsupported(path.node, "Dynamic property name"); // TODO: nontrivial computed property name
+                if (isClassProperty(path.node) || isClassPrivateProperty(path.node)) // dyn.ts treats class property initializers as functions
                     f.registerArtificialFunction(op.moduleInfo, path.node.key);
-            }
+            },
         },
 
-        Method: { // ObjectMethod | ClassMethod | ClassPrivateMethod
+        Method: {
             exit(path: NodePath<ObjectMethod | ClassMethod | ClassPrivateMethod>) {
                 switch (path.node.kind) {
                     case "method":
@@ -436,30 +561,69 @@ export function visit(ast: File, op: Operations) {
                         const key = getKey(path.node);
                         if (key) {
 
-                            // [class C...] {... p(..) {...} ...}  (static or non-static, private or public)
-                            const t = op.newFunctionToken(path.node);
-                            const ac = path.node.kind === "method" ? "normal" : path.node.kind;
-                            let dst;
-                            if (options.alloc && isObjectMethod(path.node)) {
-                                // constraint: t ∈ ⟦(ac)i.p⟧ where t denotes the function, i is the object literal,
-                                // and (ac) specifies whether it is a getter, setter or normal property
-                                dst = vp.objPropVar(a.canonicalizeToken(new ObjectToken(path.parentPath.node)), key, ac);
-                            } else if (options.alloc && (isClassMethod(path.node) || isClassPrivateMethod(path.node)) && path.node.static) {
-                                // constraint: t ∈ ⟦(ac)c.p⟧ where t denotes the function, c is the class,
-                                // and (ac) specifies whether it is a getter, setter or normal property
-                                const cls = getClass(path);
-                                assert(cls);
-                                dst = vp.objPropVar(a.canonicalizeToken(new ClassToken(cls)), key, ac);
+                            if (options.newobj) {
 
-                            } else {
-                                // constraint: t ∈ ⟦(ac)k.p⟧ where t denotes the function and k is the current package,
-                                // and (ac) specifies whether it is a getter, setter or normal property
-                                dst = vp.packagePropVar(op.file, key, ac);
+                                // [class C...] {... p(..) {...} ...}  (static or non-static, private or public)
+                                const t = op.newFunctionToken(path.node);
+                                const ac = path.node.kind === "method" ? "normal" : path.node.kind;
+                                if (isObjectMethod(path.node)) {
+                                    // constraint: t ∈ ⟦(ac)i.p⟧ where t denotes the function, i is the object literal,
+                                    // and (ac) specifies whether it is a getter, setter or normal property
+                                    const it = op.newObjectToken(path.parentPath.node);
+                                    const dst = vp.objPropVar(it, key, ac);
+                                    solver.addTokenConstraint(t, dst);
+                                    // constraint: i ∈ ⟦this_t⟧
+                                    solver.addTokenConstraint(it, vp.thisVar(path.node));
+                                } else {
+                                    const cls = getClass(path);
+                                    assert(cls);
+                                    const constr = class2constructor.get(cls);
+                                    assert(constr);
+                                    if (path.node.static) {
+                                        // constraint: t ∈ ⟦(ac)ct.p⟧ where t denotes the function,
+                                        // ct is the constructor function,
+                                        // and (ac) specifies whether it is a getter, setter or normal property
+                                        const ct = op.newFunctionToken(constr);
+                                        const dst = vp.objPropVar(ct, key, ac);
+                                        solver.addTokenConstraint(t, dst);
+                                    } else {
+                                        // constraint: t ∈ ⟦(ac)pt.p⟧ where t denotes the function,
+                                        // pt is the prototype object of the constructor function,
+                                        // and (ac) specifies whether it is a getter, setter or normal property
+                                        const pt = op.newPrototypeToken(constr);
+                                        const dst = vp.objPropVar(pt, key, ac);
+                                        solver.addTokenConstraint(t, dst);
+                                        // constraint: ⟦this_c⟧ ∈ ⟦this_t⟧
+                                        solver.addSubsetConstraint(vp.thisVar(constr), vp.thisVar(path.node));
+                                    }
+                                }
+
+                            }  else {
+
+                                // [class C...] {... p(..) {...} ...}  (static or non-static, private or public)
+                                const t = op.newFunctionToken(path.node);
+                                const ac = path.node.kind === "method" ? "normal" : path.node.kind;
+                                let dst;
+                                if (options.alloc && isObjectMethod(path.node)) {
+                                    // constraint: t ∈ ⟦(ac)i.p⟧ where t denotes the function, i is the object literal,
+                                    // and (ac) specifies whether it is a getter, setter or normal property
+                                    dst = vp.objPropVar(a.canonicalizeToken(new ObjectToken(path.parentPath.node)), key, ac);
+                                } else if (options.alloc && (isClassMethod(path.node) || isClassPrivateMethod(path.node)) && path.node.static) {
+                                    // constraint: t ∈ ⟦(ac)c.p⟧ where t denotes the function, c is the class,
+                                    // and (ac) specifies whether it is a getter, setter or normal property
+                                    const cls = getClass(path);
+                                    assert(cls);
+                                    dst = vp.objPropVar(a.canonicalizeToken(new ClassToken(cls)), key, ac);
+
+                                } else {
+                                    // constraint: t ∈ ⟦(ac)k.p⟧ where t denotes the function and k is the current package,
+                                    // and (ac) specifies whether it is a getter, setter or normal property
+                                    dst = vp.packagePropVar(op.file, key, ac);
+                                }
+                                solver.addTokenConstraint(t, dst);
                             }
-                            solver.addTokenConstraint(t, dst);
-                            // TODO: special treatment for ClassPrivateMethod? static properties?
                         } else
-                            f.warnUnsupported(path.node, "Computed method name"); // TODO: nontrivial computed method name
+                            f.warnUnsupported(path.node, "Dynamic method name"); // TODO: nontrivial computed method name
                         break;
                     case "constructor":
 
@@ -474,21 +638,66 @@ export function visit(ast: File, op: Operations) {
             }
         },
 
-        Class: { // ClassExpression | ClassDeclaration
-            exit(path: NodePath<ClassExpression | ClassDeclaration>) {
+        Class(path: NodePath<ClassExpression | ClassDeclaration>) {
+
+            let constructor: ClassMethod | undefined;
+            for (const b of path.node.body.body)
+                if (isClassMethod(b) && b.kind === "constructor") {
+                    constructor = b;
+                    break;
+                }
+            assert(constructor); // see extras.ts
+            class2constructor.set(path.node, constructor);
+
+            const exported = isExportDeclaration(path.parent);
+
+            if (options.newobj) {
+
+                const ct = op.newFunctionToken(constructor);
+
+                if (isClassExpression(path.node) || exported) {
+
+                    // class ... {...}
+                    // constraint: ct ∈ ⟦class ... {...}⟧ where ct is the constructor function
+                    if (!isParentExpressionStatement(path) || exported)
+                        solver.addTokenConstraint(ct, vp.nodeVar(path.node));
+                }
+
+                // constraint: ct ∈ ⟦C⟧ where ct is the constructor function
+                if (path.node.id)
+                    solver.addTokenConstraint(ct, vp.nodeVar(path.node.id));
 
                 if (path.node.superClass) {
 
                     // class C extends E {...}
-                    // constraint: ⟦E⟧ ⊆ ⟦extends_c⟧ where c is the class
-                    solver.addSubsetConstraint(op.expVar(path.node.superClass, path), vp.extendsVar(path.node)); // TODO: test class inheritance (see C11 in classes.js)
+                    // constraint: ∀ functions w ∈ ⟦E⟧: ...
+                    const eVar = op.expVar(path.node.superClass, path);
+                    solver.addForAllTokensConstraint(eVar, TokenListener.EXTENDS, path.node, (w: Token) => {
+
+                        // ... w ∈ ⟦ct.[[Prototype]]⟧ (allows inheritance of static properties)
+                        solver.addInherits(ct, w);
+
+                        if (w instanceof FunctionToken || w instanceof AccessPathToken) {
+                            const pt = op.newPrototypeToken(constructor!);
+
+                            if (w instanceof FunctionToken) {
+
+                                // ... ⟦w.prototype⟧ ⊆ ⟦ct.prototype.[[Prototype]]⟧ (allows inheritance of instance properties)
+                                solver.addInherits(pt, solver.varProducer.objPropVar(w, "prototype"));
+
+                                // ... ⟦this_ct⟧ ⊆ ⟦this_w⟧
+                                solver.addSubsetConstraint(solver.varProducer.thisVar(constructor!), solver.varProducer.thisVar(w.fun));
+
+                            } else {
+
+                                const p = a.canonicalizeToken(new AccessPathToken(a.canonicalizeAccessPath(new PropertyAccessPath(eVar!, "prototype"))));
+                                solver.addInherits(pt, p);
+                            }
+                        }
+                    });
                 }
 
-                let constructor: ClassMethod | ClassPrivateMethod | undefined;
-                for (const b of path.node.body.body)
-                    if ((isClassMethod(b) || isClassPrivateMethod(b)) && b.kind === "constructor")
-                        constructor = b;
-                const exported = isExportDeclaration(path.parent);
+            } else {
                 if (constructor) {
                     if (isClassExpression(path.node) || exported) {
 
@@ -562,10 +771,6 @@ export function visit(ast: File, op: Operations) {
             // TODO: CatchClause
         },
 
-        Super(path: NodePath<Super>) {
-            f.warnUnsupported(path.node); // TODO: super
-        },
-
         ImportDeclaration(path: NodePath<ImportDeclaration>) {
 
             // model 'import' like 'require'
@@ -597,7 +802,7 @@ export function visit(ast: File, op: Operations) {
 
                 // constraint: ∀ objects t ∈ ⟦import...⟧: ⟦t.p⟧ ⊆ ⟦x⟧ where p is the property and x is the local identifier
                 // for each import specifier
-                solver.addForAllConstraint(vp.nodeVar(path.node), TokenListener.IMPORT_BASE, path.node, (t: Token) => {
+                solver.addForAllTokensConstraint(vp.nodeVar(path.node), TokenListener.IMPORT_BASE, path.node, (t: Token) => {
                     for (const imp of path.node.specifiers)
                         if (isImportSpecifier(imp) || isImportDefaultSpecifier(imp)) {
                             const prop = getImportName(imp);
@@ -748,7 +953,7 @@ export function visit(ast: File, op: Operations) {
         JSXElement(path: NodePath<JSXElement>) {
             const componentVar = op.expVar(path.node.openingElement.name, path);
             if (componentVar)
-                solver.addForAllConstraint(componentVar, TokenListener.JSX_ELEMENT, path.node, (t: Token) => {
+                solver.addForAllTokensConstraint(componentVar, TokenListener.JSX_ELEMENT, path.node, (t: Token) => {
                     if (t instanceof AccessPathToken)
                         solver.addAccessPath(new ComponentAccessPath(componentVar), solver.varProducer.nodeVar(path.node), t.ap);
                 });
@@ -763,7 +968,7 @@ export function visit(ast: File, op: Operations) {
         const bp = getBaseAndProperty(path);
         const baseVar = bp ? op.expVar(bp.base, path) : undefined;
         const resultVar = vp.nodeVar(path.node);
-        op.callFunction(calleeVar, baseVar, path.node.arguments, resultVar, isNew, path);
+        op.callFunction(calleeVar, baseVar, bp?.property, path.node.arguments, resultVar, isNew, path);
     }
 
     /**

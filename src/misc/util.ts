@@ -4,6 +4,17 @@ import {ModuleInfo} from "../analysis/infos";
 import {CallGraph} from "../typings/callgraph";
 import logger from "./logger";
 
+export type SimpleLocation = {
+    start: {
+        line: number;
+        column: number;
+    };
+    end: {
+        line: number;
+        column: number;
+    };
+};
+
 /**
  * Source location with extra information.
  * 'module' is set if the location belongs to a specific module, and undefined for globals.
@@ -11,7 +22,12 @@ import logger from "./logger";
  * 'nodeIndex' is set by AST preprocessing at nodes with missing source location (see locationToString).
  * 'unbound' is set to true if this is a location for an artificially declared unbound identifier.
  */
-export type Location = SourceLocation & {module?: ModuleInfo, native?: string, nodeIndex?: number, unbound?: boolean};
+export type Location = SimpleLocation & {
+    module?: ModuleInfo;
+    native?: string;
+    nodeIndex?: number;
+    unbound?: boolean;
+};
 
 export type LocationJSON = string; // format: "<file index>:<start line>:<start column>:<end line>:<end column>"
 
@@ -102,7 +118,7 @@ export function locationContains(loc: Location | null | undefined, file: string,
 /**
  * Checks whether the first source location is within the second source location.
  */
-export function locationIn(loc1: SourceLocation, loc2: SourceLocation | undefined | null): boolean {
+export function locationIn(loc1: SimpleLocation, loc2: SimpleLocation | undefined | null): boolean {
     if (!loc2)
         return false;
     let start = loc2.start.line < loc1.start.line ||
@@ -145,21 +161,17 @@ export function getOrSet<K, V>(m: Map<K, V> , k: K, v: () => V): V
 export function getOrSet<K extends object, V>(m: WeakMap<K, V>, k: K, v: () => V): V
 export function getOrSet<K, V>(m: Map<K, V> | WeakMap<any, V>, k: K, v: () => V): V {
     let r = m.get(k);
-    if (!r) {
+    if (r === undefined) {
         r = v();
         m.set(k, r);
     }
     return r;
 }
 
-export function arrayToString(a: Array<any>, sep: string): string {
-    return a.length === 0 ? "-" : sep + a.join(sep);
-}
-
 export function mapMapSize<K1, K2, V>(m: Map<K1, Map<K2, V>>): number {
     let c = 0;
     for (const n of m.values())
-        c += n.size
+        c += n.size;
     return c;
 }
 
@@ -261,15 +273,6 @@ export function getMapHybridSetSize<K, V>(m: Map<K, V | Set<V>>): number {
     return c;
 }
 
-export function forEachMapHybridSet<K, V>(m: Map<K, V | Set<V>>, f: (k: K, v: V) => void) {
-    for (const [k, v] of m)
-        if (v instanceof Set)
-            for (const t of v)
-                f(k, t);
-        else
-            f(k, v);
-}
-
 /**
  * Computes a hashcode for the given string.
  * https://github.com/bryc/code/blob/master/jshash/experimental/cyrb53.js
@@ -328,7 +331,7 @@ export class SourceLocationsToJSON {
         return `${this.getFileIndex(loc.module ? loc.module.getPath() : loc.filename)}:${loc.start.line}:${loc.start.column + 1}:${loc.end.line}:${loc.end.column + 1}`;
     }
 
-    parseLocationJSON(loc: LocationJSON): { loc?: SourceLocation, fileIndex: number, file: string } {
+    parseLocationJSON(loc: LocationJSON): { loc?: SimpleLocation, fileIndex: number, file: string } {
         const [_, _fileIndex, startLine, startCol, endLine, endCol] = /^(\d+):(\d+|\?):(\d+|\?):(\d+|\?):(\d+|\?)/.exec(loc)!;
         const fileIndex = Number(_fileIndex);
         assert(fileIndex < this.files.length);
@@ -343,8 +346,8 @@ export class SourceLocationsToJSON {
 
         return {
             loc: {
-                start: { line: Number(startLine), column: Number(startCol)-1 },
-                end: { line: Number(endLine), column: Number(endCol)-1 },
+                start: {line: Number(startLine), column: Number(startCol)-1},
+                end: {line: Number(endLine), column: Number(endCol)-1},
             },
             fileIndex,
             file: this.files[fileIndex],
@@ -360,9 +363,9 @@ export function mapCallsToFunctions(cg: CallGraph): Map<number, number> {
     const parser = new SourceLocationsToJSON(cg.files);
     const ret = new Map();
 
-    type SourceLocationWithIndex = SourceLocation & { index: number };
-    const byFile: Array<{ functions: SourceLocationWithIndex[], calls: SourceLocationWithIndex[] }> =
-        Array.from(cg.files, () => ({ functions: [], calls: [] }));
+    type LocationWithIndex = SimpleLocation & { index: number };
+    const byFile: Array<{ functions: LocationWithIndex[], calls: LocationWithIndex[] }> =
+        Array.from(cg.files, () => ({functions: [], calls: []}));
 
     // group functions and calls by file
     for (const kind of ["functions", "calls"] as const)
@@ -380,19 +383,38 @@ export function mapCallsToFunctions(cg: CallGraph): Map<number, number> {
 
     // orders source locations primarily in ascending order by start location
     // ties are broken first by descending order of end locations and then index.
-    function compareSL(a: SourceLocationWithIndex, b: SourceLocationWithIndex): number {
+    function compareSL(a: LocationWithIndex, b: LocationWithIndex): number {
         return compareLC(a.start, b.start) || -compareLC(a.end, b.end) || a.index - b.index;
     }
 
     for (const [i, {functions, calls}] of byFile.entries()) {
+        if (functions.length === 0) {
+            logger.error(`Call graph contains file ${cg.files[i]} without functions`);
+            continue;
+        }
+
         functions.sort(compareSL);
         calls.sort(compareSL);
+
+        let synthModFun: LocationWithIndex | undefined = functions[0];
+        if (synthModFun.start.line !== 1 || synthModFun.start.column !== 0) {
+            const funs = functions.map(f => parser.makeLocString({...f, filename: cg.files[i]})).join("\n\t");
+            logger.warn(`No synthetic module function for file ${cg.files[i]}\nFunctions:\n\t${funs}`);
+            synthModFun = undefined;
+        }
 
         // sweep over functions and calls simultaneously, maintaining a stack of functions
         const stack = [];
         let funIndex = 0;
 
         for (const call of calls) {
+            if (synthModFun && !locationIn(call, synthModFun)) {
+                const cs = parser.makeLocString({...call, filename: cg.files[i]});
+                const fs = parser.makeLocString({...synthModFun, filename: cg.files[i]});
+                logger.error(`Call ${cs} is outside module function (${fs})`);
+                continue;
+            }
+
             // remove functions that ended before the call starts
             while (stack.length && compareLC(stack[stack.length-1]!.end, call.start) <= 0)
                 stack.pop();
@@ -404,7 +426,7 @@ export function mapCallsToFunctions(cg: CallGraph): Map<number, number> {
                 // the synthetic module function. requiring that calls are stricly before functions
                 // is required due to how functions sometimes have incorrect start positions in the
                 // dynamic analysis
-                if (cmp < 0 || (cmp === 0 && fun.start.line == 1 && fun.start.column === 0)) {
+                if (cmp < 0 || (cmp === 0 && fun.start.line === 1 && fun.start.column === 0)) {
                     funIndex++;
 
                     if (compareLC(fun.end, call.start) > 0)
@@ -413,9 +435,12 @@ export function mapCallsToFunctions(cg: CallGraph): Map<number, number> {
                     break;
             }
 
-            assert(stack.length);
-            const fun = stack[stack.length-1];
+            if (stack.length === 0) {
+                logger.error(`No function surrounding call ${parser.makeLocString({...call, filename: cg.files[i]})}!`);
+                continue;
+            }
 
+            const fun = stack[stack.length-1];
             if (!locationIn(call, fun)) {
                 // this should not happen!
                 // one case has been observed where the same file is loaded multiple times in the dynamic

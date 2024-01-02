@@ -1,11 +1,14 @@
 import Solver from "./solver";
 import {ObjectToken, PackageObjectToken, Token} from "./tokens";
 import logger from "../misc/logger";
-import {ConstraintVar, ObjectPropertyVar} from "./constraintvars";
-import {addAll, getOrSet, mapGetMap, mapGetSet} from "../misc/util";
+import {AncestorsVar, ConstraintVar, ObjectPropertyVar} from "./constraintvars";
+import {addAll, getOrSet, mapGetMap} from "../misc/util";
 import Timer from "../misc/timer";
 import {CallResultAccessPath, ComponentAccessPath, PropertyAccessPath} from "./accesspaths";
 import assert from "assert";
+import {INTERNAL_PROTOTYPE} from "../natives/ecmascript";
+import {TokenListener} from "./listeners";
+import {isNode} from "@babel/types";
 
 // TODO: OK to assume that all tokens in widened belong to the current fragment?
 // TODO: measure effect of widening...
@@ -56,16 +59,6 @@ export function widenObjects(widened: Set<ObjectToken>, solver: Solver) {
         return [res, size];
     }
 
-    function widenTokenMapSetKeysValues(m: Map<Token, Set<Token>>): Map<Token, Set<Token>> {
-        const res: Map<Token, Set<Token>> = new Map;
-        for (const [v, qs] of m) {
-            const ws = mapGetSet(res, widenToken(v));
-            for (const q of qs)
-                ws.add(widenToken(q));
-        }
-        return res;
-    }
-
     function widenTokenMapMapKeys<T extends Token, K, V>(m: Map<T, Map<K, V>>): Map<T | PackageObjectToken, Map<K, V>> {
         const res: Map<T | PackageObjectToken, Map<K, V>> = new Map;
         for (const [t, m2] of m) {
@@ -76,7 +69,7 @@ export function widenObjects(widened: Set<ObjectToken>, solver: Solver) {
         return res;
     }
 
-    const varMap: Map<ObjectPropertyVar, ObjectPropertyVar> = new Map; // cache for widenVar
+    const varMap: Map<ObjectPropertyVar | AncestorsVar, ObjectPropertyVar | AncestorsVar> = new Map; // cache for widenVar
 
     /**
      * Returns the widened version of the given constraint variable, or the constraint variable itself if it is not being widened.
@@ -85,7 +78,9 @@ export function widenObjects(widened: Set<ObjectToken>, solver: Solver) {
         if (v instanceof ObjectPropertyVar && v.obj instanceof ObjectToken && widened.has(v.obj)) {
             const vobj = v.obj;
             return getOrSet(varMap, v, () => f.varProducer.packagePropVar(vobj.getPackageInfo(), v.prop, v.accessor));
-        } else
+        } else if (v instanceof AncestorsVar && v.t instanceof ObjectToken && widened.has(v.t))
+            return getOrSet(varMap, v, () => f.varProducer.ancestorsVar(v.t));
+        else
             return v;
     }
 
@@ -121,13 +116,42 @@ export function widenObjects(widened: Set<ObjectToken>, solver: Solver) {
     [solver.unprocessedTokens, solver.diagnostics.unprocessedTokensSize] = widenTokenMapArrayValues(solver.unprocessedTokens);
     assert(solver.nodesWithNewEdges.size === 0);
     solver.replaceTokens(tokenMap);
-    f.ancestorListeners = widenTokenMapMapKeys(f.ancestorListeners);
-    // transfer ancestors from widened objects
-    for (const [t, pt] of tokenMap)
-        for (const anc of f.inherits.get(t) ?? [])
-            solver.addInherits(pt, anc);
-    f.inherits = widenTokenMapSetKeysValues(f.inherits);
-    f.reverseInherits = widenTokenMapSetKeysValues(f.reverseInherits);
+
+    // transfer token listeners that use widened tokens as keys
+    // (we could do this in redirect?)
+    // this de-duplicates some listeners on constraint variables for widened objects
+    for (const [t, pt] of tokenMap) {
+        // transfer ancestor listeners
+        const av = f.getRepresentative(a.canonicalizeVar(new AncestorsVar(t)));
+        const m = f.tokenListeners.get(av);
+        if (m !== undefined)
+            for (const [id, listener] of m) {
+                const [tid, t2, n, s] = solver.listeners.get(id)!;
+                if ((tid === TokenListener.READ_ANCESTORS || tid == TokenListener.ASSIGN_ANCESTORS) && t === t2) {
+                    m.delete(id);
+                    assert(isNode(n) && s !== undefined);
+                    solver.addForAllAncestorsConstraint(pt, tid, n, s, listener);
+                }
+            }
+        if (f.objectProperties.get(t)?.has(INTERNAL_PROTOTYPE())) {
+            // transfer prototype listeners
+            const av = f.getRepresentative(a.canonicalizeVar(ObjectPropertyVar.make(solver, t, INTERNAL_PROTOTYPE())));
+            const m = f.tokenListeners.get(av);
+            if (m !== undefined)
+                for (const [id, listener] of m) {
+                    const [tid, t2, s, n] = solver.listeners.get(id)!;
+                    if (t === t2) {
+                        assert(typeof s === "string" && n === undefined &&
+                            // these are the only TokenListener keys that are used with ObjectTokens.
+                            // TODO: we could probably guarantee this statically with types
+                            [TokenListener.ANCESTORS, TokenListener.READ_PROPERTY_GETTER_THIS, TokenListener.ASSIGN_SETTER_THIS].includes(tid));
+                        m.delete(id);
+                        solver.addForAllTokensConstraint(f.varProducer.objPropVar(pt, INTERNAL_PROTOTYPE()), tid, pt, listener, s);
+                    }
+                }
+        }
+    }
+
     f.objectPropertiesListeners = widenTokenMapMapKeys(f.objectPropertiesListeners);
     // transfer object properties from widened objects
     for (const [t, pt] of tokenMap) {
@@ -150,6 +174,10 @@ export function widenObjects(widened: Set<ObjectToken>, solver: Solver) {
     for (const e of f.maybeEmptyPropertyReads) {
         e.result = widenVar(e.result);
         e.base = widenVar(e.base);
+    }
+    for (const e of f.maybeEmptyMethodCalls.values()) {
+        e.baseVar = widenVar(e.baseVar);
+        e.calleeVar = widenVar(e.calleeVar);
     }
     for (const e of f.unhandledDynamicPropertyWrites.values())
         e.src = widenVar(e.src);
