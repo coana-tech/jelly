@@ -1,9 +1,9 @@
-import {ConstraintVar, ObjectPropertyVarObj} from "./constraintvars";
+import {ConstraintVar, ObjectPropertyVar, ObjectPropertyVarObj, isObjectPropertyVarObj} from "./constraintvars";
 import {
     AccessPathToken,
-    AllocationSiteToken,
     ArrayToken,
     FunctionToken,
+    NativeObjectToken,
     ObjectToken,
     PackageObjectToken,
     Token
@@ -18,10 +18,11 @@ import {
     JSXIdentifier,
     NewExpression,
     Node,
-    OptionalCallExpression
+    OptionalCallExpression,
+    SourceLocation,
 } from "@babel/types";
 import assert from "assert";
-import {mapGetSet, locationToStringWithFile, locationToStringWithFileAndEnd, addMapHybridSet} from "../misc/util";
+import {mapGetSet, locationToStringWithFile, locationToStringWithFileAndEnd, addMapHybridSet, addAll, mapGetMap} from "../misc/util";
 import {AccessPath, CallResultAccessPath, ComponentAccessPath, ModuleAccessPath, PropertyAccessPath} from "./accesspaths";
 import {options} from "../options";
 import logger from "../misc/logger";
@@ -29,6 +30,7 @@ import {NodePath} from "@babel/traverse";
 import {GlobalState} from "./globalstate";
 import {ConstraintVarProducer} from "./constraintvarproducer";
 import Solver from "./solver";
+import {MaybeEmptyPropertyRead} from "../patching/patchdynamics";
 
 export type ListenerID = bigint;
 
@@ -80,7 +82,7 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     /**
      * Constraint variable producer.
      */
-    readonly varProducer;
+    readonly varProducer: ConstraintVarProducer<RVT>;
 
     /**
      * The current analysis solution.
@@ -115,11 +117,7 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
 
     readonly tokenListeners: Map<RVT, Map<ListenerID, (t: Token) => void>> = new Map;
 
-    readonly pairListeners1: Map<RVT, Map<ListenerID, [ConstraintVar, (t1: AllocationSiteToken, t2: FunctionToken | AccessPathToken) => void]>> = new Map;
-
-    readonly pairListeners2: Map<RVT, Map<ListenerID, [ConstraintVar, (t1: AllocationSiteToken, t2: FunctionToken | AccessPathToken) => void]>> = new Map;
-
-    readonly listenersProcessed: Map<ListenerID, Set<Token | bigint>> = new Map;
+    readonly listenersProcessed: Map<ListenerID, Set<Token>> = new Map;
 
     readonly packageNeighborListeners: Map<PackageInfo, Map<ListenerID, (neighbor: PackageInfo) => void>> = new Map;
 
@@ -129,7 +127,11 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
 
     readonly packageNeighbors: Map<PackageInfo, Set<PackageInfo>> = new Map;
 
-    readonly postponedListenerCalls: Array<[(t: Token) => void, Token] | [(t1: AllocationSiteToken, t2: FunctionToken | AccessPathToken) => void, [AllocationSiteToken, FunctionToken | AccessPathToken]] | [(neighbor: PackageInfo) => void, PackageInfo] | [(prop: string) => void, string]> = [];
+    readonly postponedListenerCalls: Array<
+        [(t: Token) => void, Token] |
+        [(neighbor: PackageInfo) => void, PackageInfo] |
+        [(prop: string) => void, string]
+    > = [];
 
     /**
      * Map that provides for each function/module the set of modules being required.
@@ -182,7 +184,7 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
      * Source code locations that correspond to the start of artificial functions in dyn.ts.
      * Such functions are ignored during soundness testing.
      */
-    readonly artificialFunctions: Array<[ModuleInfo, Node]> = [];
+    readonly artificialFunctions: Array<[ModuleInfo, SourceLocation]> = [];
 
     /**
      * Source locations of all calls (including accessor calls).
@@ -223,10 +225,10 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     readonly invokedExpressions: Set<Node> = new Set;
 
     /**
-     * Constraint variables that represent expressions whose values may escape to other modules.
+     * Token values and constraint variables that represent expressions whose values may escape to other modules.
      * Includes arguments to functions from other modules.
      */
-    readonly maybeEscapingFromModule: Set<ConstraintVar> = new Set;
+    readonly maybeEscapingFromModule: Set<Token | ConstraintVar> = new Set;
 
     /**
      * Object tokens that have been widened.
@@ -309,10 +311,16 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     readonly importDeclRefs: Map<Identifier, Array<Identifier | JSXIdentifier>> = new Map;
 
     /**
+     * Set of property read operations encountered during analysis.
+     * Used to add call edges for accessors after the analysis terminates.
+     */
+    readonly propertyReads: Set<{base: ConstraintVar, prop: string, node: Node, enclosing: FunctionInfo | ModuleInfo}> = new Set;
+
+    /**
      * Property reads that may have empty result.
      * Used by patchDynamics.
      */
-    maybeEmptyPropertyReads: Array<{result: ConstraintVar, base: ConstraintVar, pck: PackageObjectToken, prop: string | undefined}> = [];
+    maybeEmptyPropertyReads: Array<MaybeEmptyPropertyRead> = [];
 
     /**
      * Dynamic property writes.
@@ -340,12 +348,12 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
             (!native || options.callgraphNative) &&
             (!external || options.callgraphExternal)) {
             // register function->function
-            let fs = mapGetSet(this.functionToFunction, from);
+            const fs = mapGetSet(this.functionToFunction, from);
             if (!fs.has(to))
                 this.numberOfFunctionToFunctionEdges++;
             fs.add(to);
             // register call->function
-            let cs = mapGetSet(this.callToFunction, call);
+            const cs = mapGetSet(this.callToFunction, call);
             if (!cs.has(to)) {
                 this.numberOfCallToFunctionEdges++;
                 if (logger.isVerboseEnabled())
@@ -424,9 +432,9 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     }
 
     /**
-     * Registers that values of the expression represented by the given constraint variable may escape to other modules.
+     * Registers that the token or values of the expression represented by the given constraint variable may escape to other modules.
      */
-    registerEscapingFromModule(v: ConstraintVar | undefined) {
+    registerEscapingFromModule(v: Token | ConstraintVar | undefined) {
         if (v)
             this.maybeEscapingFromModule.add(v);
     }
@@ -462,8 +470,9 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     /**
      * Registers a function that may be ignored in output from dyn.ts.
      */
-    registerArtificialFunction(m: ModuleInfo, n: Node) {
-        this.artificialFunctions.push([m, n]);
+    registerArtificialFunction(m: ModuleInfo, sl: Node["loc"]) {
+        if (sl)
+            this.artificialFunctions.push([m, sl]);
     }
 
     /**
@@ -670,7 +679,7 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     /**
      * Returns the number of constraint variables with tokens.
      */
-    getNumberOfVarsWithTokens() {
+    getNumberOfVarsWithTokens(): number {
         return this.tokens.size;
     }
 
@@ -696,13 +705,6 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
             if (vs.size > c)
                 c = vs.size;
         return c;
-    }
-
-    /**
-     * Checks whether the given variable has tokens.
-     */
-    hasVar(v: RVT) {
-        return this.tokens.has(v);
     }
 
     /**
@@ -772,7 +774,7 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
         return added;
     }
 
-    /*
+    /**
      * If the provided token is an object token that has been widened, the corresponding package object token is returned.
      * Otherwise the provided token is returned as is.
      */
@@ -781,5 +783,62 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
             return this.a.canonicalizeToken(new PackageObjectToken(t.getPackageInfo(), t.kind));
         else
             return t;
+    }
+
+    /**
+     * Adds call edges for getters of collected property read operations.
+     */
+    resolveGetterCalls() {
+        // collect getters for each property
+        const getters = new Map<string, Map<ObjectPropertyVarObj, Set<FunctionToken>>>();
+        const add = (prop: string, obj: ObjectPropertyVarObj, ts: Iterable<Token>) => {
+            obj = this.maybeWidened(obj);
+            if (obj instanceof NativeObjectToken)
+                return;
+
+            const gs = [...ts].filter(t => t instanceof FunctionToken && t.fun.params.length === 0);
+            if (gs.length === 0)
+                return;
+
+            addAll(gs, mapGetSet(mapGetMap(getters, prop), obj));
+        };
+        for (const [v, ts] of this.tokens)
+            if (v instanceof ObjectPropertyVar && v.accessor === "get")
+                add(v.prop, v.obj, ts instanceof Token ? [ts] : ts);
+        for (const v of this.redirections.keys())
+            if (v instanceof ObjectPropertyVar && v.accessor === "get") {
+                const [n, ts] = this.getTokensSize(this.getRepresentative(v));
+                if (n > 0)
+                    add(v.prop, v.obj, ts);
+            }
+
+        for (const {base, prop, node, enclosing} of this.propertyReads) {
+            const gs = getters.get(prop);
+            if (!gs)
+                continue;
+
+            const ts = new Set<ObjectPropertyVarObj>(); // objects to look up getters for
+            for (const t of this.getTokens(this.getRepresentative(base)))
+                if (isObjectPropertyVarObj(t)) {
+                    ts.add(t);
+                    addAll(this.getTokens(this.getRepresentative(this.varProducer.ancestorsVar(t))), ts);
+
+                    // mirror logic from readPropertyBound...
+                    if (t instanceof PackageObjectToken && t.kind === "Object")
+                        for (const n of this.packageNeighbors.get(t.packageInfo) ?? [])
+                            ts.add(this.a.canonicalizeToken(new PackageObjectToken(n, "Object")));
+                }
+
+            for (const t of ts) {
+                const fts = gs.get(t);
+                if (fts)
+                    for (const ft of fts) {
+                        this.registerCall(node, {accessor: true});
+                        this.registerCallEdge(node, enclosing, this.a.functionInfos.get(ft.fun)!, {accessor: true});
+                    }
+            }
+        }
+
+        this.propertyReads.clear();
     }
 }

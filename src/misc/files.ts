@@ -40,7 +40,7 @@ export function expand(paths: Array<string> | string): Array<string> {
 
 function* expandRec(path: string, sub: boolean): Generator<string> {
     const stat = lstatSync(path);
-    const inNodeModules = path.includes("node_modules");
+    const inNodeModules = options.assumeInNodeModules || path.includes("node_modules");
     if (stat.isDirectory()) {
         const base = basename(path);
         if (!sub ||
@@ -59,7 +59,7 @@ function* expandRec(path: string, sub: boolean): Generator<string> {
             logger.debug(`Skipping directory ${path}`);
     } else if (stat.isFile() && !path.endsWith(".d.ts") &&
         (!inNodeModules || !(path.endsWith(".min.js") || path.endsWith(".bundle.js"))) &&
-        (path.endsWith(".js") || path.endsWith(".jsx") || path.endsWith(".es") || path.endsWith(".mjs") || path.endsWith(".cjs") || path.endsWith(".ts") || path.endsWith(".tsx")
+        (path.endsWith(".js") || path.endsWith(".jsx") || path.endsWith(".es") || path.endsWith(".mjs") || path.endsWith(".cjs") || path.endsWith(".ts") || path.endsWith(".tsx") || path.endsWith(".mts") || path.endsWith(".cts")
             || isShebang(path)))
         yield relative(options.basedir, path);
     else
@@ -72,7 +72,7 @@ function* expandRec(path: string, sub: boolean): Generator<string> {
 function isShebang(path: string): boolean { // TODO: doesn't work with hacks like https://sambal.org/2014/02/passing-options-node-shebang-line/
     const fd = openSync(path, 'r');
     const buf = Buffer.alloc(256);
-    readSync(fd, buf, 0, buf.length, 0)
+    readSync(fd, buf, 0, buf.length, 0);
     closeSync(fd);
     const str = buf.toString('utf8');
     return str.startsWith("#!") && str.substring(0, str.indexOf("\n")).includes("node");
@@ -134,7 +134,7 @@ export function requireResolve(str: string, file: FilePath, node: Node, f: Fragm
         logger.debug(msg);
         throw new Error(msg);
     }
-    if (filepath.endsWith(".d.ts") || ![".js", ".jsx", ".es", ".mjs", ".cjs", ".ts", ".tsx"].includes(extname(filepath))) {
+    if (filepath.endsWith(".d.ts") || ![".js", ".jsx", ".es", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"].includes(extname(filepath))) {
         f.warn(`Module '${filepath}' has unrecognized extension, skipping it`, node);
         return undefined;
     }
@@ -190,15 +190,15 @@ const codeCache: Map<SourceLocationStr, string> = new Map<SourceLocationStr, str
 export function codeFromLocation(loc: Location | null | undefined): string {
     if (!loc)
         return "-";
-    let locStr = locationToStringWithFileAndEnd(loc, true);
+    const locStr = locationToStringWithFileAndEnd(loc, true);
     let content = codeCache.get(locStr);
     if (!content) {
         content = "";
         if (loc && loc.module) {
-            let fileContent = readFileSync(loc.module.getPath()).toString().split(/\r?\n/);
+            const fileContent = readFileSync(loc.module.getPath()).toString().split(/\r?\n/);
             let startRecord = false;
             for (let i = loc.start.line; i <= loc.end.line; i++) {
-                let currLine = fileContent[i - 1];
+                const currLine = fileContent[i - 1];
                 for (let j = 0; j < currLine.length; j++) {
                     if (i === loc.start.line && loc.start.column === j)
                         startRecord = true;
@@ -226,7 +226,7 @@ export function writeStreamedStringify(value: any,
                                        fd: number,
                                        replacer?: ((key: string, value: any) => any) | (number | string)[] | null,
                                        space?: string | number) {
-    stringify(value, (chunk : string | undefined) => {
+    stringify(value, (chunk: string | undefined) => {
         if (chunk)
             writeSync(fd, chunk);
     }, replacer, space);

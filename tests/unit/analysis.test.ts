@@ -1,23 +1,34 @@
 import assert from "assert";
 import {Node, blockStatement, functionExpression, identifier, traverse, SourceLocation} from "@babel/types";
 import {UnknownAccessPath} from "../../src/analysis/accesspaths";
-import {ConstraintVar, IntermediateVar, ObjectPropertyVar} from "../../src/analysis/constraintvars";
+import {ConstraintVar, IntermediateVar, ObjectPropertyVar, isObjectPropertyVarObj} from "../../src/analysis/constraintvars";
 import {findEscapingObjects} from "../../src/analysis/escaping";
 import {ModuleInfo, PackageInfo} from "../../src/analysis/infos";
 import Solver from "../../src/analysis/solver";
-import {AccessPathToken, FunctionToken, NativeObjectToken, ObjectToken, PackageObjectToken} from "../../src/analysis/tokens";
+import {
+    AccessPathToken,
+    ArrayToken,
+    FunctionToken,
+    NativeObjectToken,
+    ObjectToken,
+    PackageObjectToken,
+    Token,
+} from "../../src/analysis/tokens";
 import {options, resetOptions} from "../../src/options";
 import {JELLY_NODE_ID} from "../../src/parsing/extras";
 import {TokenListener} from "../../src/analysis/listeners";
+import {Operations} from "../../src/analysis/operations";
 import {widenObjects} from "../../src/analysis/widening";
+import {patchDynamics} from "../../src/patching/patchdynamics";
+import "../../src/testing/compare";
 
 describe("tests/unit/analysis", () => {
-    beforeAll(() => {
+    beforeEach(() => {
         resetOptions();
         options.cycleElimination = true;
     });
 
-    const p = new PackageInfo("fake", undefined, undefined, "fake", true);
+    const p = new PackageInfo("fake", undefined, undefined, "node_modules/fake", true);
     const packagekey = "fake@?";
     const m = new ModuleInfo("fake.js", p, true, true);
 
@@ -118,44 +129,6 @@ describe("tests/unit/analysis", () => {
             expect(keys).not.toContain(vB);
         });
 
-        test("pair listener 1", () => {
-            const {solver, a, f, redirect} = setup;
-
-            const at = a.canonicalizeToken(new ObjectToken(param));
-            const ft = a.canonicalizeToken(new FunctionToken(fun0));
-            expect(at).not.toBe(ft);
-
-            const fn = jest.fn();
-            solver.addForAllTokenPairsConstraint(vA, vB, TokenListener.AWAIT, param, "", fn);
-            redirect(vB, vRep1);
-            solver.addTokenConstraint(ft, vB);
-            solver.addSubsetConstraint(vA, vRep2);
-            solver.addTokenConstraint(at, vRep2);
-            assert(f.isRepresentative(vA) && f.isRepresentative(vRep2));
-            solver.redirect(vA, vRep2);
-
-            expect(f.postponedListenerCalls, "Pair listener call should be enqueued", {showMatcherMessage: false}).
-                toContainEqual([fn, [at, ft]]);
-        });
-
-        test("pair listener 1 & 2", () => {
-            const {solver, a, f} = setup;
-
-            const at = a.canonicalizeToken(new ObjectToken(param));
-            const ft = a.canonicalizeToken(new FunctionToken(fun0));
-
-            const fn = jest.fn();
-            solver.addForAllTokenPairsConstraint(vA, vA, TokenListener.AWAIT, param, "", fn);
-            solver.addTokenConstraint(ft, vA);
-            assert(f.isRepresentative(vA) && f.isRepresentative(vRep));
-            solver.addSubsetEdge(vA, vRep, false);
-            solver.addTokenConstraint(at, vRep);
-            solver.redirect(vA, vRep);
-
-            expect(f.postponedListenerCalls, "Pair listener call should be enqueued", {showMatcherMessage: false}).
-                toContainEqual([fn, [at, ft]]);
-        });
-
         test("object property", () => {
             const {solver, a, f, redirect} = setup;
 
@@ -169,6 +142,32 @@ describe("tests/unit/analysis", () => {
                 f.objectProperties.get(ot),
                 "An object property for ot should be registered regardless of redirection",
             ).toEqual(new Set(["A"]));
+        });
+
+        test("read property chain getters", async () => {
+            const {solver, a, f, redirect, getTokens} = setup;
+
+            const ot1 = a.canonicalizeToken(new ObjectToken(fun0));
+            const ot2 = a.canonicalizeToken(new ObjectToken(fun1));
+            const g1 = f.varProducer.objPropVar(ot1, "A", "get");
+            const g2 = f.varProducer.objPropVar(ot2, "A", "get");
+            redirect(g1, g2);
+
+            // fun0 is a getter that returns an array
+            const ft = a.canonicalizeToken(new FunctionToken(fun0));
+            const at = a.canonicalizeToken(new ArrayToken(fun0));
+            solver.addTokenConstraint(ft, g2);
+            solver.addTokenConstraint(at, solver.varProducer.returnVar(fun0));
+
+            const op = new Operations(m.getPath(), solver, new Map());
+            const r2 = op.readPropertyFromChain(ot2, "A");
+            await solver.propagate();
+            expect(getTokens(r2)).toEqual([at]);
+
+            // both tokens should be able to read from the getter(s)
+            const r1 = op.readPropertyFromChain(ot1, "A");
+            await solver.propagate();
+            expect(getTokens(r1)).toEqual([at]);
         });
     });
 
@@ -191,6 +190,7 @@ describe("tests/unit/analysis", () => {
         test("module.exports = function", () => {
             const {solver, a, f, getTokens} = setup;
 
+            f.functionsWithThis.add(fun1);
             solver.addTokenConstraint(a.canonicalizeToken(new FunctionToken(fun1)), vExports);
             expect([...f.vars]).toContain(vExports);
 
@@ -198,6 +198,7 @@ describe("tests/unit/analysis", () => {
             expect(escaping.size).toBe(0);
 
             expect(getTokens(f.varProducer.nodeVar(param))).toContain(tUnknown);
+            expect(getTokens(f.varProducer.thisVar(fun1))).toContain(tUnknown);
         });
 
         test("maybeEscapingFromModule(function)", () => {
@@ -291,6 +292,40 @@ describe("tests/unit/analysis", () => {
             expect(getTokens(rep)).toEqual([tFunction, tUnknown]);
             expect(getTokens(f.varProducer.nodeVar(param))).toEqual([tUnknown]);
         });
+
+        test.each(["./fake.js", "./*", "./*.js"])("exported library module: %s", (pattern: string) => {
+            const {solver, a, f, getTokens} = setup;
+
+            a.packageJsonInfos.set(p.dir, {
+                name: p.name,
+                dir: p.dir,
+                version: undefined,
+                main: undefined,
+                packagekey,
+                exports: [pattern],
+            });
+
+            solver.addTokenConstraint(a.canonicalizeToken(new FunctionToken(fun1)), vExports);
+            expect(findEscapingObjects(m, solver).size).toBe(0);
+            expect(getTokens(f.varProducer.nodeVar(param))).toContain(tUnknown);
+        });
+
+        test("unexported library module", () => {
+            const {solver, a, f, getTokens} = setup;
+
+            a.packageJsonInfos.set(p.dir, {
+                name: p.name,
+                dir: p.dir,
+                version: undefined,
+                main: undefined,
+                packagekey,
+                exports: ["./other-file.js"],
+            });
+
+            solver.addTokenConstraint(a.canonicalizeToken(new FunctionToken(fun1)), vExports);
+            expect(findEscapingObjects(m, solver).size).toBe(0);
+            expect(getTokens(f.varProducer.nodeVar(param))).not.toContain(tUnknown);
+        });
     });
 
     describe("widening", () => {
@@ -358,8 +393,8 @@ describe("tests/unit/analysis", () => {
             const ot2 = a.canonicalizeToken(new ObjectToken(fun1));
             const fn1 = jest.fn();
             const fn2 = jest.fn();
-            solver.addForAllObjectPropertiesConstraint(ot1, TokenListener.NATIVE_1, param, fn1);
-            solver.addForAllObjectPropertiesConstraint(ot2, TokenListener.NATIVE_2, param, fn2);
+            solver.addForAllObjectPropertiesConstraint(ot1, TokenListener.NATIVE_8, param, fn1);
+            solver.addForAllObjectPropertiesConstraint(ot2, TokenListener.NATIVE_11, param, fn2);
 
             solver.addObjectProperty(ot, "A");
 
@@ -396,26 +431,29 @@ describe("tests/unit/analysis", () => {
         });
 
         test("PackageObjectToken gets ancestor listeners", async () => {
-            const {solver, f} = setup;
+            const {solver} = setup;
 
+            solver.addTokenConstraint(ot, vA);
             const fn = jest.fn();
-            solver.addForAllAncestorsConstraint(ot, TokenListener.ASSIGN_ANCESTORS, param, "", fn);
+            solver.addForAllTokensConstraint(vA, TokenListener.ASSIGN_MEMBER_BASE, param, (t: Token) => {
+                assert(isObjectPropertyVarObj(t));
+                solver.addForAllAncestorsConstraint(t, TokenListener.ASSIGN_ANCESTORS, {n: param}, fn);
+            });
 
-            expect(f.postponedListenerCalls, `Ancestor listener should be enqueued with ${ot}`, {showMatcherMessage: false}).
-                toEqual([[fn, ot]]);
             await solver.propagate();
+            expect(fn).toHaveBeenLastCalledWith(ot);
 
             widenObjects(new Set([ot]), solver);
 
-            expect(f.postponedListenerCalls, `Ancestor listener should be enqueued with ${pt}`, {showMatcherMessage: false}).
-                toEqual([[fn, pt]]);
+            await solver.propagate();
+            expect(fn).toHaveBeenLastCalledWith(pt);
         });
 
         test("Ancestor listener triggers for widened ancestor", async () => {
             const {solver, a} = setup;
 
             const fn = jest.fn();
-            solver.addForAllAncestorsConstraint(ot, TokenListener.READ_ANCESTORS, param, "", fn);
+            solver.addForAllAncestorsConstraint(ot, TokenListener.READ_ANCESTORS, {n: param}, fn);
 
             await solver.propagate();
             expect(fn).toHaveBeenLastCalledWith(ot);
@@ -430,6 +468,51 @@ describe("tests/unit/analysis", () => {
 
             await solver.propagate();
             expect(fn).toHaveBeenLastCalledWith(pt);
+        });
+    });
+
+    describe("patch dynamics", () => {
+        test("cycle elimination", () => {
+            options.patchDynamics = true;
+            const {solver: solver1} = getSolver();
+            const {solver: solver2} = getSolver();
+
+            const fun = (solver: Solver, doCycleElimination: boolean) => {
+                // Set up the solver with two distinct empty property reads.
+                // The result variables of the reads are in a subset cycle.
+                // Both base variables contain the same token, which has been
+                // subject to a dynamic property write.
+                // If doCycleElimination is true, the two result variables are
+                // merged. This should not affect the result of the analysis!
+                const a = solver.globalState;
+                const ot = a.canonicalizeToken(new ObjectToken(param));
+                const pt = a.canonicalizeToken(new PackageObjectToken(p));
+
+                const f = solver.fragmentState;
+                const [base1, base2, res1, res2] = "base1 base2 res1 res2".split(" ").map(s => solver.fragmentState.varProducer.intermediateVar(param, s));
+                solver.addSubsetConstraint(res1, res2);
+                solver.addSubsetConstraint(res2, res1);
+                if (doCycleElimination) {
+                    assert(f.isRepresentative(res1) && f.isRepresentative(res2));
+                    solver.redirect(res1, res2);
+                }
+
+                solver.collectPropertyRead("read", res1, base1, pt, "A", param, m);
+                solver.collectPropertyRead("read", res2, base2, pt, "A", param, m);
+                solver.collectDynamicPropertyWrite(base1);
+                solver.addTokenConstraint(ot, base1);
+                solver.addTokenConstraint(ot, base2);
+
+                expect(patchDynamics(solver)).toBeTruthy();
+            };
+
+            fun(solver1, true);
+            fun(solver2, false);
+
+            // TODO: remove cast
+            // requires 'import {expect} from "@jest/globals";', but that breaks multi-arg expect
+            // from 'jest-expect-message'
+            (expect(solver2) as any).toMatchAnalysisResults(solver1);
         });
     });
 });

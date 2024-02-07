@@ -169,11 +169,11 @@ export class AnalysisStateReporter {
         }
         fs.writeSync(fd, `${first ? "" : "\n "}],\n "ignore": [`);
         first = true;
-        for (const [m, n] of this.f.artificialFunctions) {
+        for (const [m, loc] of this.f.artificialFunctions) {
             const fileIndex = fileIndices.get(m);
             if (fileIndex === undefined)
                 assert.fail(`File index not found for ${m}`);
-            fs.writeSync(fd, `${first ? "" : ","}\n  ${JSON.stringify(this.makeLocStr(fileIndex, n.loc))}`);
+            fs.writeSync(fd, `${first ? "" : ","}\n  ${JSON.stringify(this.makeLocStr(fileIndex, loc))}`);
             first = false;
         }
         fs.writeSync(fd, `${first ? "" : "\n "}]\n}\n`);
@@ -252,11 +252,11 @@ export class AnalysisStateReporter {
             calls,
             fun2fun,
             call2fun,
-            ignore: this.f.artificialFunctions.map(([m, n]) => {
+            ignore: this.f.artificialFunctions.map(([m, loc]) => {
                 const fileIndex = fileIndices.get(m);
                 if (fileIndex === undefined)
                     assert.fail(`File index not found for ${m}`);
-                return this.makeLocStr(fileIndex, n.loc);
+                return this.makeLocStr(fileIndex, loc);
             }),
         };
     }
@@ -384,16 +384,31 @@ export class AnalysisStateReporter {
     /**
      * Returns the number of call sites that have exactly one callee.
      */
-    getOneCalleeCalls() {
+    getOneCalleeCalls(): number {
         let r = 0;
         for (const c of this.f.callLocations) {
             const cs = this.f.callToFunction.get(c);
             if (cs)
                 if (cs.size === 1)
                     r++;
-                else if (cs.size > 1)
+        }
+        return r;
+    }
+
+    /**
+     * Returns the number of call sites that have multiple callees.
+     */
+    getMultipleCalleeCalls(): number {
+        let r = 0;
+        for (const c of this.f.callLocations) {
+            const cs = this.f.callToFunction.get(c);
+            if (cs) {
+                if (cs.size > 1) {
+                    r++;
                     if (logger.isDebugEnabled())
                         logger.debug(`Call with multiple callees at ${locationToStringWithFile(c.loc)}: ${cs.size}`);
+                }
+            }
         }
         return r;
     }
@@ -535,7 +550,7 @@ export class AnalysisStateReporter {
      * Reports the kinds of constraint variables and the number of occurrences for each kind.
      */
     reportVariableKinds() {
-        const varsWithListeners = new Set<ConstraintVar>([...this.f.tokenListeners.keys(), ...this.f.pairListeners1.keys(), ...this.f.pairListeners2.keys()]);
+        const varsWithListeners = this.f.tokenListeners;
         const counts = new Map<string, number>();
         const withListenersCounts = new Map<string, number>();
         const srcCounts = new Map<string, number>();

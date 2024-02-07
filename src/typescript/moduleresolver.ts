@@ -6,13 +6,13 @@ import {options} from "../options";
 import logger from "../misc/logger";
 
 const host = ts.createCompilerHost({});
+
 const parseConfigHost: ts.ParseConfigHost = {
     fileExists: host.fileExists,
     readDirectory: ts.sys.readDirectory,
     readFile: host.readFile,
     useCaseSensitiveFileNames: host.useCaseSensitiveFileNames(),
 };
-
 
 /**
  * Resolves module names using the TypeScript compiler.
@@ -24,7 +24,7 @@ export class TSModuleResolver {
 
     private getTSOptions(file: FilePath): ts.CompilerOptions {
         let opts: ts.CompilerOptions = {
-          module: ts.ModuleKind.NodeNext,
+            module: ts.ModuleKind.NodeNext,
         };
 
         // find the nearest tsconfig.json file
@@ -68,21 +68,21 @@ export class TSModuleResolver {
         return opts;
     }
 
-  /**
-   * Resolves a module name using the TypeScript compiler.
-   * @param str module name
-   * @param file current file path
-   * @return resolved file path if successful
-   * @throws exception if the module is not found
-   */
-  resolveModuleName(str: string, file: FilePath): FilePath {
-      const opts = this.getTSOptions(file);
-      const resolutionMode = ts.getImpliedNodeFormatForFile(file as ts.Path, undefined, host, opts);
-      const t = str.endsWith(".ts") && resolutionMode !== ts.ModuleKind.ESNext ? str.substring(0, str.length - 3) : str;
-      const filepath = ts.resolveModuleName(t, file, opts, host, undefined, undefined, resolutionMode).resolvedModule?.resolvedFileName;
-      // TS does not always respect noDtsResolution=true when the enclosing package has a 'typesVersions' field
-      if (!filepath || (filepath.endsWith(".d.ts") && !str.endsWith(".d.ts")))
-          throw new Error();
-      return filepath;
-  }
+    /**
+     * Resolves a module name using the TypeScript compiler.
+     * @param str module name
+     * @param file current file path
+     * @return resolved file path if successful
+     * @throws exception if the module is not found
+     */
+    resolveModuleName(str: string, file: FilePath): FilePath {
+        const opts = this.getTSOptions(file);
+        const resolutionMode = ts.getImpliedNodeFormatForFile(file as ts.Path, undefined, host, opts);
+        const t = str.endsWith(".ts") && resolutionMode !== ts.ModuleKind.ESNext ? str.substring(0, str.length - 3) : str;
+        const filepath = ts.resolveModuleName(t, file, opts, host, undefined, undefined, resolutionMode).resolvedModule?.resolvedFileName;
+        // TS does not always respect noDtsResolution=true when the enclosing package has a 'typesVersions' field
+        if (!filepath || (filepath.endsWith(".d.ts") && !str.endsWith(".d.ts")))
+            throw new Error();
+        return filepath;
+    }
 }

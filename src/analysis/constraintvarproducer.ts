@@ -29,9 +29,10 @@ import {
     NodeVar,
     ObjectPropertyVar,
     ObjectPropertyVarObj,
+    ReadResultVar,
     ThisVar
 } from "./constraintvars";
-import {ArrayToken, ObjectToken, PackageObjectToken, Token} from "./tokens";
+import {ArrayToken, ObjectToken, PackageObjectToken} from "./tokens";
 import {FilePath, Location} from "../misc/util";
 import {PackageInfo} from "./infos";
 import {GlobalState} from "./globalstate";
@@ -99,6 +100,7 @@ export class ConstraintVarProducer<RVT extends RepresentativeVar | MergeRepresen
 
     /**
      * Finds the constraint variable for a named object property.
+     * The (obj, prop) pair is registered on the provided solver instance and listener calls may be enqueued.
      */
     objPropVar(obj: ObjectPropertyVarObj, prop: string, accessor: AccessorType = "normal"): ObjectPropertyVar {
         if (obj instanceof ObjectToken && this.f.widened.has(obj))
@@ -164,9 +166,15 @@ export class ConstraintVarProducer<RVT extends RepresentativeVar | MergeRepresen
         return n !== undefined ? this.a.canonicalizeVar(new NodeVar(n)) : undefined;
     }
 
-    ancestorsVar(t: Token): AncestorsVar {
+    ancestorsVar(t: ObjectPropertyVarObj): AncestorsVar {
         if (t instanceof ObjectToken && this.f.widened.has(t))
             t = this.a.canonicalizeToken(new PackageObjectToken(t.getPackageInfo()));
         return this.a.canonicalizeVar(new AncestorsVar(t));
+    }
+
+    readResultVar(t: ObjectPropertyVarObj, prop: string): ReadResultVar {
+        if (t instanceof ObjectToken && this.f.widened.has(t))
+            t = this.a.canonicalizeToken(new PackageObjectToken(t.getPackageInfo()));
+        return this.a.canonicalizeVar(new ReadResultVar(t, prop));
     }
 }

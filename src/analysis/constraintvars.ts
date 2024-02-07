@@ -111,7 +111,7 @@ export class ObjectPropertyVar extends ConstraintVar {
         return `${this.accessor === "get" ? "(get)" : this.accessor === "set" ? "(set)" : ""}${this.obj}.${this.prop}`;
     }
 
-    getParent() {
+    getParent(): Node | PackageInfo | ModuleInfo | undefined {
         return getTokenParent(this.obj);
     }
 }
@@ -125,7 +125,7 @@ export class FunctionReturnVar extends ConstraintVar {
         super();
     }
 
-    toString() {
+    toString(): string {
         return `Return[${locationToStringWithFileAndEnd(this.fun.loc, true)}]`;
     }
 
@@ -143,7 +143,7 @@ export class ThisVar extends ConstraintVar {
         super();
     }
 
-    toString() {
+    toString(): string {
         return `This[${locationToStringWithFileAndEnd(this.fun.loc, true)}]`;
     }
 
@@ -161,7 +161,7 @@ export class ArgumentsVar extends ConstraintVar {
         super();
     }
 
-    toString() {
+    toString(): string {
         return `Arguments[${locationToStringWithFileAndEnd(this.fun.loc, true)}]`;
     }
 
@@ -182,7 +182,7 @@ export class IntermediateVar extends ConstraintVar {
         super();
     }
 
-    toString() {
+    toString(): string {
         return `#${this.label}[${locationToStringWithFileAndEnd(this.node.loc, true)}]`;
     }
 
@@ -196,15 +196,37 @@ export class IntermediateVar extends ConstraintVar {
  */
 export class AncestorsVar extends ConstraintVar {
 
-    constructor(readonly t: Token) {
+    constructor(readonly t: ObjectPropertyVarObj) {
         super();
     }
 
-    toString() {
+    toString(): string {
         return `Ancestors(${this.t})`;
     }
 
-    getParent() {
+    getParent(): Node | PackageInfo | ModuleInfo | undefined {
+        return getTokenParent(this.t);
+    }
+}
+
+/**
+ * A constraint variable for caching the result of a property read operation
+ * that follows the prototype chain.
+ */
+export class ReadResultVar extends ConstraintVar {
+
+    constructor(
+        readonly t: ObjectPropertyVarObj,
+        readonly prop: string,
+    ) {
+        super();
+    }
+
+    toString(): string {
+        return `ReadResult[${this.t}.${this.prop}]`;
+    }
+
+    getParent(): Node | PackageInfo | ModuleInfo | undefined {
         return getTokenParent(this.t);
     }
 }

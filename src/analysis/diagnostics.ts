@@ -42,6 +42,8 @@ export default class AnalysisDiagnostics {
 
     callsWithUniqueCallee: number = 0; // set when analysis is completed
 
+    callsWithMultipleCallees: number = 0; //set when analysis is completed
+
     callsWithNoCallee: number = 0; // set when analysis is completed
 
     nativeOnlyCalls: number = 0; // set when analysis is completed
@@ -63,8 +65,6 @@ export default class AnalysisDiagnostics {
     lastPrintDiagnosticsTime: number = 0;
 
     tokenListenerNotifications: number = 0;
-
-    pairListenerNotifications: number = 0;
 
     packageNeighborListenerNotifications: number = 0;
 

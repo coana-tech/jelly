@@ -6,6 +6,8 @@ import {isIdentifier} from "@babel/types";
 import Solver from "./solver";
 import {UnknownAccessPath} from "./accesspaths";
 import {isInternalProperty} from "../natives/ecmascript";
+import {options} from "../options";
+import {isInExports} from "../misc/packagejson";
 
 /**
  * Finds the ObjectTokens that may be accessed from outside the module via exporting to or importing from other modules.
@@ -16,6 +18,7 @@ import {isInternalProperty} from "../natives/ecmascript";
 export function findEscapingObjects(m: ModuleInfo, solver: Solver): Set<ObjectToken> {
     const a = solver.globalState;
     const f = solver.fragmentState; // (don't use in callbacks)
+
     const worklist: Array<ObjectPropertyVarObj> = [];
     const visited = new Set<Token>();
     const escaping = new Set<ObjectToken>();
@@ -25,30 +28,41 @@ export function findEscapingObjects(m: ModuleInfo, solver: Solver): Set<ObjectTo
      * Adds the tokens of the given constraint variable to the worklist if not already visited.
      * Note: PackageObjectTokens, AccessPathTokens and (most) NativeObjectTokens are ignored.
      */
-    function addToWorklist(v: ConstraintVar) {
-        for (const t of f.getTokens(f.getRepresentative(v)))
+    function addToWorklist(v: Token | ConstraintVar) {
+        for (const t of v instanceof Token ? [v] : f.getTokens(f.getRepresentative(v)))
             if ((t instanceof AllocationSiteToken || t instanceof FunctionToken || (t instanceof NativeObjectToken && t.name === "exports")) && !visited.has(t)) {
                 worklist.push(t);
                 visited.add(t);
             }
     }
 
-    // first round, seed worklist with module.exports, find functions accessible via property reads
-    addToWorklist(f.varProducer.objPropVar(a.canonicalizeToken(new NativeObjectToken("module", m)), "exports"));
-    const w2: Array<ObjectPropertyVarObj> = [];
-    while (worklist.length !== 0) {
-        const t = worklist.shift()!; // breadth-first
-        if (t instanceof FunctionToken)
-            w2.push(t);
-        else if (t instanceof ObjectToken || (t instanceof NativeObjectToken && t.name === "exports"))
-            for (const p of f.objectProperties.get(t) ?? [])
-                if (!isInternalProperty(p))
-                    addToWorklist(f.varProducer.objPropVar(t, p));
+    let isModuleExporting = true;
+    if (!m.getPath().includes("node_modules") && !options.assumeInNodeModules) // do not consider escaping objects for application modules
+        isModuleExporting = false;
+    else {
+        const pi = a.packageJsonInfos.get(m.packageInfo.dir);
+        if (pi?.exports && !isInExports(`./${m.relativePath}`, pi.exports)) // only consider escaping objects from library modules that are exported
+            isModuleExporting = false;
     }
-    visited.clear();
-    for (const t of w2) {
-        visited.add(t);
-        worklist.push(t);
+
+    // first round, seed worklist with module.exports, find functions accessible via property reads
+    if (isModuleExporting) {
+        addToWorklist(f.varProducer.objPropVar(a.canonicalizeToken(new NativeObjectToken("module", m)), "exports"));
+        const w2: Array<ObjectPropertyVarObj> = [];
+        while (worklist.length !== 0) {
+            const t = worklist.shift()!; // breadth-first
+            if (t instanceof FunctionToken)
+                w2.push(t);
+            else if (t instanceof ObjectToken || (t instanceof NativeObjectToken && t.name === "exports"))
+                for (const p of f.objectProperties.get(t) ?? [])
+                    if (!isInternalProperty(p))
+                        addToWorklist(f.varProducer.objPropVar(t, p));
+        }
+        visited.clear();
+        for (const t of w2) {
+            visited.add(t);
+            worklist.push(t);
+        }
     }
     // add expressions collected during AST traversal
     for (const v of f.maybeEscapingFromModule)
@@ -74,6 +88,8 @@ export function findEscapingObjects(m: ModuleInfo, solver: Solver): Set<ObjectTo
             for (const param of t.fun.params)
                 if (isIdentifier(param)) // TODO: Pattern|RestElement?
                     solver.addToken(theUnknownAccessPathToken, f.getRepresentative(f.varProducer.nodeVar(param)));
+            if (f.functionsWithThis.has(t.fun))
+                solver.addToken(theUnknownAccessPathToken, f.getRepresentative(f.varProducer.thisVar(t.fun)));
 
             // TODO: also consider inheritance, ClassExtendsVar?
         }

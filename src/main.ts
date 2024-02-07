@@ -34,7 +34,7 @@ import {CallGraph} from "./typings/callgraph";
 program
     .name("jelly")
     .version(VERSION)
-    .addHelpText("before", "Copyright (C) 2023 Anders Møller\n")
+    .addHelpText("before", "Copyright (C) 2023-2024 Anders Møller & Oskar Haarklou Veileborg\n")
     .option("-b, --basedir <directory>", "base directory for files to analyze (default: auto-detect)")
     .option("-f, --logfile <file>", "log to file (default: log to stdout)")
     .option("-l, --loglevel <level>", "log level (debug/verbose/info/warn/error)", "info")
@@ -60,11 +60,6 @@ program
     .option("--tokens-json <file>", "save tokens for constraint variables as JSON file")
     .option("--tokens", "report tokens for constraint variables")
     .option("--largest", "report largest token sets and subset relations")
-    .option("--no-alloc", "disable light-weight allocation site abstraction")
-    .option("--no-widening", "disable widening")
-    .option("--no-patch-dynamics", "disable dynamic property access patching heuristic")
-    .option("--patch-method-calls", "enable method call patching heuristic")
-    .option("--no-read-neighbors", "disable package neighbor heuristic")
     .option("--no-cycle-elimination", "disable cycle elimination")
     .option("--no-natives", "disable nonessential models of native libraries")
     .option("--skip-graal-test", "skip graal-nodejs test (use with -d)")
@@ -93,8 +88,15 @@ program
     .option("--modules-only", "report reachable packages and modules only, no analysis")
     .option("--compare-callgraphs", "compare two call graphs given as JSON files, no analysis")
     .option("--reachability", "compare reachability as an additional call graph comparison metric (use with -s or --compare-callgraphs)")
-    .option("--newobj", "new object abstraction (experimental)")
+    .option("--assume-in-node-modules", "treat analyzed files as in node_modules")
+    .option("--no-alloc", "disable allocation site abstraction")
+    .option("--oldobj", "old object abstraction")
+    .option("--widening", "enable object widening")
+    .option("--patch-dynamics", "enable dynamic property access patching heuristic")
+    .option("--patch-method-calls", "enable method call patching heuristic")
+    .option("--read-neighbors", "enable package neighbor heuristic")
     .option("--proto", "model assignments to the __proto__ property")
+    .option("--obj-spread", "model spread syntax for object literals ({...obj})")
     .usage("[options] [files]")
     .addHelpText("after",
         "\nAll modules reachable by require/import from the given files are included in the analysis\n" +
@@ -102,7 +104,7 @@ program
         "If specifying directories instead of files, the files in the directories and their\n" +
         "subdirectories are used as entry points.\n" +
         "The special argument -- indicates end of options, typically after multi-argument options.\n" +
-        `Memory limit is ${getMemoryLimit()}MB.${PKG ? "" : " Change with, for example: NODE_OPTIONS=--max-old-space-size=4096"}`)
+        `Memory limit is ${getMemoryLimit()}MB.${PKG ? "" : " Change with, for example: NODE_OPTIONS=--max-old-space-size=8192"}`)
     .action(main)
     .showHelpAfterError()
     .parse();
@@ -124,7 +126,7 @@ async function main() {
 
     if (options.compareCallgraphs) {
         if (program.args.length !== 2) {
-            logger.error(`Error: Option --compare-callgraphs expects two files`);
+            logger.error("Error: Option --compare-callgraphs expects two files");
             process.exitCode = -1;
             return;
         }
@@ -133,7 +135,7 @@ async function main() {
     }
 
     if (options.patterns && options.vulnerabilities) { // TODO: also check this in server.ts
-        logger.error(`Error: Options --patterns and --vulnerabilities cannot be used together`); // pattern match confidence computation requires relevant libraries to be external
+        logger.error("Error: Options --patterns and --vulnerabilities cannot be used together"); // pattern match confidence computation requires relevant libraries to be external
         process.exitCode = -1;
         return;
     }
@@ -156,7 +158,7 @@ async function main() {
         const graalHome = options.graalHome || process.env.GRAAL_HOME;
         const node = graalHome ? path.resolve(graalHome, "bin/node") : "node";
         if (!options.skipGraalTest) {
-            logger.info("Testing graal-nodejs")
+            logger.info("Testing graal-nodejs");
             const t = spawnSync(node, ["-e", "process.exit(typeof Graal === 'object' ? 0 : -1)"]);
             if (t.status === null) {
                 logger.error(`Error: Unable to execute ${node}`);
@@ -283,7 +285,7 @@ async function main() {
             if (options.typescript)
                 typer = new TypeScriptTypeInferrer(files);
 
-            let vr: VulnerabilityResults = {};
+            const vr: VulnerabilityResults = {};
             if (vulnerabilityDetector) {
                 vr.package = vulnerabilityDetector.findPackagesThatMayDependOnVulnerablePackages(f);
                 vr.module = vulnerabilityDetector.findModulesThatMayDependOnVulnerableModules(f);

@@ -10,7 +10,7 @@ import {
     PackageObjectToken,
     Token
 } from "../analysis/tokens";
-import {getBaseAndProperty, getKey, isParentExpressionStatement} from "../misc/asthelpers";
+import {getKey, isParentExpressionStatement} from "../misc/asthelpers";
 import {Node} from "@babel/core";
 import {
     ARRAY_PROTOTYPE,
@@ -32,23 +32,18 @@ import {NodePath} from "@babel/traverse";
 import {Operations} from "../analysis/operations";
 import {AccessorType, ConstraintVar, IntermediateVar, ObjectPropertyVarObj, isObjectPropertyVarObj} from "../analysis/constraintvars";
 import {Location} from "../misc/util";
+import {UnknownAccessPath} from "../analysis/accesspaths";
 
 /**
  * Models an assignment from a function parameter (0-based indexing) to a property of the base object.
  */
 export function assignParameterToThisProperty(param: number, prop: string, p: NativeFunctionParams) {
-    if (p.path.node.arguments.length > param) {
-        const bp = getBaseAndProperty(p.path);
+    if (p.path.node.arguments.length > param && p.base) {
         const arg = p.path.node.arguments[param];
         const argVar = isExpression(arg) ? p.solver.varProducer.expVar(arg, p.path) : undefined;
-        if (argVar && bp) { // TODO: non-expression arguments?
-            const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
-            p.solver.addForAllTokensConstraint(baseVar, TokenListener.NATIVE_1, arg, (t: Token) => {
-                if (t instanceof NativeObjectToken || t instanceof AllocationSiteToken || t instanceof FunctionToken || t instanceof PackageObjectToken) {
-                    p.solver.addSubsetConstraint(argVar, p.solver.varProducer.objPropVar(t, prop));
-                }
-            });
-        }
+        if (argVar) // TODO: non-expression arguments?
+            // TODO: use Operations.writeProperty?
+            p.solver.addSubsetConstraint(argVar, p.solver.varProducer.objPropVar(p.base, prop));
     }
 }
 
@@ -57,27 +52,18 @@ export function assignParameterToThisProperty(param: number, prop: string, p: Na
  */
 function assignExpressionToArrayValue(from: Expression, t: ArrayToken, p: NativeFunctionParams) {
     const argVar = p.solver.varProducer.expVar(from, p.path);
-    if (argVar) {
+    if (argVar)
         p.solver.addSubsetConstraint(argVar, p.solver.varProducer.arrayUnknownVar(t));
-        p.solver.addForAllArrayEntriesConstraint(t, TokenListener.NATIVE_13, from, (prop: string) =>
-            p.solver.addSubsetConstraint(argVar, p.solver.varProducer.objPropVar(t, prop)));
-    }
 }
 
 /**
  * Models an assignment from a function parameter (0-based indexing) to an unknown entry of the base array object.
  */
 export function assignParameterToThisArrayValue(param: number, p: NativeFunctionParams) {
-    if (p.path.node.arguments.length > param) {
-        const bp = getBaseAndProperty(p.path);
+    if (p.path.node.arguments.length > param && p.base instanceof ArrayToken) {
         const arg = p.path.node.arguments[param];
-        if (isExpression(arg) && bp) { // TODO: non-expression arguments?
-            const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
-            p.solver.addForAllTokensConstraint(baseVar, TokenListener.NATIVE_2, arg, (t: Token) => {
-                if (t instanceof ArrayToken)
-                    assignExpressionToArrayValue(arg, t, p);
-            });
-        }
+        if (isExpression(arg)) // TODO: non-expression arguments?
+            assignExpressionToArrayValue(arg, p.base, p);
     }
 }
 
@@ -96,36 +82,25 @@ export function assignParameterToArrayValue(param: number, t: ArrayToken, p: Nat
  * Models a property of the base object being returned from a function.
  */
 export function returnThisProperty(prop: string, p: NativeFunctionParams) {
-    const bp = getBaseAndProperty(p.path);
-    if (!isParentExpressionStatement(p.path) && bp) {
-        const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
-        p.solver.addForAllTokensConstraint(baseVar, TokenListener.NATIVE_3, p.path.node, (t: Token) => {
-            if (t instanceof NativeObjectToken || t instanceof AllocationSiteToken || t instanceof FunctionToken || t instanceof PackageObjectToken)
-                p.solver.addSubsetConstraint(p.solver.varProducer.objPropVar(t, prop), p.solver.varProducer.nodeVar(p.path.node));
-        });
-    }
+    if (!isParentExpressionStatement(p.path) && p.base)
+        p.solver.addSubsetConstraint(p.solver.varProducer.objPropVar(p.base, prop), p.solver.varProducer.nodeVar(p.path.node));
 }
 
 /**
  * Models the base object being returned from a function.
  */
 export function returnThis(p: NativeFunctionParams) {
-    const bp = getBaseAndProperty(p.path);
-    if (!isParentExpressionStatement(p.path) && bp) {
-        const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
-        p.solver.addSubsetConstraint(baseVar, p.solver.varProducer.nodeVar(p.path.node));
-    }
+    if (!isParentExpressionStatement(p.path) && p.base)
+        p.solver.addTokenConstraint(p.base, p.solver.varProducer.nodeVar(p.path.node));
 }
 
 /**
  * Models the base object wrapped into a promise being returned from a function.
  */
 export function returnThisInPromise(p: NativeFunctionParams) {
-    const bp = getBaseAndProperty(p.path);
-    if (!isParentExpressionStatement(p.path) && bp) {
-        const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
+    if (!isParentExpressionStatement(p.path) && p.base) {
         const promise = newObject("Promise", p.globalSpecialNatives.get(PROMISE_PROTOTYPE)!, p);
-        p.solver.addSubsetConstraint(baseVar, p.solver.varProducer.objPropVar(promise, PROMISE_FULFILLED_VALUES));
+        p.solver.addTokenConstraint(p.base, p.solver.varProducer.objPropVar(promise, PROMISE_FULFILLED_VALUES));
         p.solver.addTokenConstraint(promise, p.solver.varProducer.nodeVar(p.path.node));
     }
 }
@@ -134,30 +109,22 @@ export function returnThisInPromise(p: NativeFunctionParams) {
  * Models an unknown entry of the base array object being returned from a function.
  */
 export function returnArrayValue(p: NativeFunctionParams) {
-    const bp = getBaseAndProperty(p.path);
-    if (!isParentExpressionStatement(p.path) && bp) {
-        const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
-        p.solver.addForAllTokensConstraint(baseVar, TokenListener.NATIVE_4, p.path.node, (t: Token) => {
-            if (t instanceof ArrayToken)
-                p.solver.addSubsetConstraint(p.solver.varProducer.arrayAllVar(t), p.solver.varProducer.nodeVar(p.path.node));
-        });
-    }
+    const vp = p.solver.varProducer;
+    if (!isParentExpressionStatement(p.path) && p.base instanceof ArrayToken)
+        p.solver.addSubsetConstraint(vp.arrayAllVar(p.base), vp.nodeVar(p.path.node));
 }
 
 /**
  * Models creation of an array that contains the same values as in the base array but in unknown order.
  */
 export function returnShuffledArray(p: NativeFunctionParams): ArrayToken | undefined {
-    const bp = getBaseAndProperty(p.path);
-    if (!isParentExpressionStatement(p.path) && bp) {
+    if (!isParentExpressionStatement(p.path) && p.base) {
         const res = newArray(p);
         returnToken(res, p);
-        const resVar = p.solver.varProducer.arrayUnknownVar(res);
-        const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
-        p.solver.addForAllTokensConstraint(baseVar, TokenListener.NATIVE_5, p.path.node, (t: Token) => {
-            if (t instanceof ArrayToken)
-                p.solver.addSubsetConstraint(p.solver.varProducer.arrayAllVar(t), resVar);
-        });
+        if (p.base instanceof ArrayToken) {
+            const resVar = p.solver.varProducer.arrayUnknownVar(res);
+            p.solver.addSubsetConstraint(p.solver.varProducer.arrayAllVar(p.base), resVar);
+        }
         return res;
     } else
         return undefined;
@@ -167,14 +134,10 @@ export function returnShuffledArray(p: NativeFunctionParams): ArrayToken | undef
  * Models an unknown permutation of the values in the base array, returning the base array.
  */
 export function returnShuffledInplace(p: NativeFunctionParams) {
-    const bp = getBaseAndProperty(p.path);
-    if (!isParentExpressionStatement(p.path) && bp) {
-        const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
-        p.solver.addForAllTokensConstraint(baseVar, TokenListener.NATIVE_6, p.path.node, (t: Token) => {
-            if (t instanceof ArrayToken)
-                p.solver.addSubsetConstraint(p.solver.varProducer.arrayAllVar(t), baseVar);
-        });
-        p.solver.addSubsetConstraint(baseVar, p.solver.varProducer.nodeVar(p.path.node));
+    if (!isParentExpressionStatement(p.path) && p.base) {
+        if (p.base instanceof ArrayToken)
+            p.solver.addSubsetConstraint(p.solver.varProducer.arrayAllVar(p.base), p.solver.varProducer.arrayUnknownVar(p.base));
+        p.solver.addTokenConstraint(p.base, p.solver.varProducer.nodeVar(p.path.node));
     }
 }
 
@@ -252,6 +215,13 @@ export function returnToken(t: Token, p: NativeFunctionParams) {
     p.solver.addTokenConstraint(t, p.solver.varProducer.expVar(p.path.node, p.path));
 }
 
+/**
+ * Models returning @Unknown.
+ */
+export function returnUnknown(p: NativeFunctionParams) {
+    p.solver.addAccessPath(UnknownAccessPath.instance, p.solver.varProducer.expVar(p.path.node, p.path));
+}
+
 type IteratorKind =
     "ArrayKeys" |
     "ArrayValues" |
@@ -266,83 +236,80 @@ type IteratorKind =
  * Models returning an Iterator object for the given kind of base object.
  */
 export function returnIterator(kind: IteratorKind, p: NativeFunctionParams) { // TODO: see also astvisitor.ts:ForOfStatement
-    const bp = getBaseAndProperty(p.path);
-    if (!isParentExpressionStatement(p.path) && bp) {
+    if (!isParentExpressionStatement(p.path) && p.base) {
         const a = p.solver.globalState;
-        const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
-        p.solver.addForAllTokensConstraint(baseVar, TokenListener.NATIVE_7, p.path.node, (t: Token) => {
-            const vp = p.solver.varProducer; // (don't use in callbacks)
-            if (t instanceof AllocationSiteToken) {
-                const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", t.allocSite));
-                p.solver.addTokenConstraint(iter, vp.expVar(p.path.node, p.path));
-                const iterNext = vp.objPropVar(iter, "next");
-                p.solver.addTokenConstraint(p.globalSpecialNatives.get(GENERATOR_PROTOTYPE_NEXT)!, iterNext);
-                const iterValue = vp.objPropVar(iter, "value");
-                switch (kind) {
-                    case "ArrayKeys": {
-                        if (t.kind !== "Array")
-                            break;
-                        // do nothing, the iterator values are just primitives
+        const t = p.base;
+        const vp = p.solver.varProducer; // (don't use in callbacks)
+        if (t instanceof AllocationSiteToken) {
+            const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", t.allocSite));
+            p.solver.addTokenConstraint(iter, vp.expVar(p.path.node, p.path));
+            const iterNext = vp.objPropVar(iter, "next");
+            p.solver.addTokenConstraint(p.globalSpecialNatives.get(GENERATOR_PROTOTYPE_NEXT)!, iterNext);
+            const iterValue = vp.objPropVar(iter, "value");
+            switch (kind) {
+                case "ArrayKeys": {
+                    if (t.kind !== "Array")
                         break;
-                    }
-                    case "ArrayValues": {
-                        if (t.kind !== "Array")
-                            break;
-                        p.solver.addSubsetConstraint(vp.arrayAllVar(t), iterValue);
+                    // do nothing, the iterator values are just primitives
+                    break;
+                }
+                case "ArrayValues": {
+                    if (t.kind !== "Array")
                         break;
-                    }
-                    case "ArrayEntries": {
-                        if (t.kind !== "Array")
-                            break;
-                        const pair = a.canonicalizeToken(new ArrayToken(p.path.node)); // TODO: see newArrayToken
-                        p.solver.addInherits(t, p.globalSpecialNatives.get(ARRAY_PROTOTYPE)!);
-                        p.solver.addTokenConstraint(pair, iterValue);
-                        const oneVar = vp.objPropVar(pair, "1");
-                        p.solver.addSubsetConstraint(vp.arrayAllVar(t), oneVar);
+                    p.solver.addSubsetConstraint(vp.arrayAllVar(t), iterValue);
+                    break;
+                }
+                case "ArrayEntries": {
+                    if (t.kind !== "Array")
                         break;
-                    }
-                    case "SetValues": {
-                        if (t.kind !== "Set")
-                            break;
-                        p.solver.addSubsetConstraint(vp.objPropVar(t, SET_VALUES), iterValue);
+                    const pair = a.canonicalizeToken(new ArrayToken(p.path.node)); // TODO: see newArrayToken
+                    p.solver.addInherits(t, p.globalSpecialNatives.get(ARRAY_PROTOTYPE)!);
+                    p.solver.addTokenConstraint(pair, iterValue);
+                    const oneVar = vp.objPropVar(pair, "1");
+                    p.solver.addSubsetConstraint(vp.arrayAllVar(t), oneVar);
+                    break;
+                }
+                case "SetValues": {
+                    if (t.kind !== "Set")
                         break;
-                    }
-                    case "SetEntries": {
-                        if (t.kind !== "Set")
-                            break;
-                        const pair = a.canonicalizeToken(new ArrayToken(p.path.node)); // TODO: see newArrayToken
-                        p.solver.addInherits(t, p.globalSpecialNatives.get(ARRAY_PROTOTYPE)!);
-                        p.solver.addTokenConstraint(pair, iterValue);
-                        p.solver.addSubsetConstraint(vp.objPropVar(t, SET_VALUES), vp.objPropVar(pair, "0"));
-                        p.solver.addSubsetConstraint(vp.objPropVar(t, SET_VALUES), vp.objPropVar(pair, "1"));
+                    p.solver.addSubsetConstraint(vp.objPropVar(t, SET_VALUES), iterValue);
+                    break;
+                }
+                case "SetEntries": {
+                    if (t.kind !== "Set")
                         break;
-                    }
-                    case "MapKeys": {
-                        if (t.kind !== "Map")
-                            break;
-                        p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_KEYS), iterValue);
+                    const pair = a.canonicalizeToken(new ArrayToken(p.path.node)); // TODO: see newArrayToken
+                    p.solver.addInherits(t, p.globalSpecialNatives.get(ARRAY_PROTOTYPE)!);
+                    p.solver.addTokenConstraint(pair, iterValue);
+                    p.solver.addSubsetConstraint(vp.objPropVar(t, SET_VALUES), vp.objPropVar(pair, "0"));
+                    p.solver.addSubsetConstraint(vp.objPropVar(t, SET_VALUES), vp.objPropVar(pair, "1"));
+                    break;
+                }
+                case "MapKeys": {
+                    if (t.kind !== "Map")
                         break;
-                    }
-                    case "MapValues": {
-                        if (t.kind !== "Map")
-                            break;
-                        p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_VALUES), iterValue);
+                    p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_KEYS), iterValue);
+                    break;
+                }
+                case "MapValues": {
+                    if (t.kind !== "Map")
                         break;
-                    }
-                    case "MapEntries": {
-                        if (t.kind !== "Map")
-                            break;
-                        const pair = a.canonicalizeToken(new ArrayToken(p.path.node)); // TODO: see newArrayToken
-                        p.solver.addInherits(t, p.globalSpecialNatives.get(ARRAY_PROTOTYPE)!);
-                        p.solver.addTokenConstraint(pair, iterValue);
-                        p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_KEYS), vp.objPropVar(pair, "0"));
-                        p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_VALUES), vp.objPropVar(pair, "1"));
+                    p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_VALUES), iterValue);
+                    break;
+                }
+                case "MapEntries": {
+                    if (t.kind !== "Map")
                         break;
-                    }
-                } // TODO: also handle TypedArray
-            }
-            // TODO: also handle arguments, user-defined...
-        });
+                    const pair = a.canonicalizeToken(new ArrayToken(p.path.node)); // TODO: see newArrayToken
+                    p.solver.addInherits(t, p.globalSpecialNatives.get(ARRAY_PROTOTYPE)!);
+                    p.solver.addTokenConstraint(pair, iterValue);
+                    p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_KEYS), vp.objPropVar(pair, "0"));
+                    p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_VALUES), vp.objPropVar(pair, "1"));
+                    break;
+                }
+            } // TODO: also handle TypedArray
+        }
+        // TODO: also handle arguments, user-defined...
     }
 }
 
@@ -360,7 +327,6 @@ type CallbackKind =
     "Array.prototype.sort" |
     "Map.prototype.forEach" |
     "Set.prototype.forEach" |
-    "new Promise" |
     "Promise.prototype.then$onFulfilled" |
     "Promise.prototype.then$onRejected" |
     "Promise.prototype.catch$onRejected" |
@@ -373,14 +339,19 @@ export function invokeCallback(kind: CallbackKind, p: NativeFunctionParams, arg:
     const args = p.path.node.arguments;
     if (args.length > arg) {
         const funarg = args[arg];
-        const bp = getBaseAndProperty(p.path);
-        if (isExpression(funarg) && bp) { // TODO: SpreadElement? non-MemberExpression?
+        const bt = p.base;
+        if (isExpression(funarg) && // TODO: SpreadElement? non-MemberExpression?
+                // this is for feature parity with the old pair constraint:
+                (bt instanceof AllocationSiteToken || bt instanceof PackageObjectToken)) {
             // const a = p.solver.globalState;
-            const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
             const funVar = p.solver.varProducer.expVar(funarg, p.path);
             // const caller = a.getEnclosingFunctionOrModule(p.path, p.moduleInfo);
-            p.solver.addForAllTokenPairsConstraint(baseVar, funVar, key, funarg, kind, (bt: AllocationSiteToken, ft: FunctionToken | AccessPathToken) => { // TODO: ignoring native functions etc.
-                invokeCallbackBound(kind, p, bt, ft, baseVar!);
+            p.solver.addForAllTokensConstraint(funVar, key, {n: funarg, t: bt, s: kind}, (ft: Token) => {
+                if (!(ft instanceof FunctionToken || ft instanceof AccessPathToken))
+                    return; // TODO: ignoring native functions etc.
+
+                invokeCallbackBound(kind, p, bt, ft);
+
                 if (ft instanceof AccessPathToken) {
                     p.solver.fragmentState.registerEscapingToExternal(funVar, funarg);
 
@@ -391,7 +362,7 @@ export function invokeCallback(kind: CallbackKind, p: NativeFunctionParams, arg:
     }
 }
 
-export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams, bt: AllocationSiteToken | PackageObjectToken, ft: FunctionToken | AccessPathToken, pBaseVar: ConstraintVar | undefined) {
+export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams, bt: AllocationSiteToken | PackageObjectToken, ft: FunctionToken | AccessPathToken) {
     const solver = p.solver;
     const f = solver.fragmentState;
     const vp = f.varProducer;
@@ -401,9 +372,9 @@ export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams,
     const pResultVar = vp.expVar(p.path.node, p.path);
     const caller = a.getEnclosingFunctionOrModule(p.path, p.moduleInfo);
 
-    const modelCall = (argVars: Array<ConstraintVar | undefined>, baseVar?: ConstraintVar, resultVar?: ConstraintVar) => {
+    const modelCall = (args: Array<Token | ConstraintVar | undefined>, baseVar?: ConstraintVar, resultVar?: ConstraintVar) => {
         assert(ft instanceof FunctionToken);
-        p.op.callFunctionTokenBound(ft, baseVar, caller, argVars, resultVar, false, p.path, {native: true});
+        p.op.callFunctionTokenBound(ft, baseVar, caller, args, resultVar, false, p.path, {native: true});
     };
 
     // helper for constructing unique intermediate variables
@@ -436,7 +407,7 @@ export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams,
 
             if (ft instanceof FunctionToken)
                 // write array elements to param1
-                modelCall([bt instanceof ArrayToken ? vp.arrayAllVar(bt) : undefined, undefined, pBaseVar], arg1Var, resultVar);
+                modelCall([bt instanceof ArrayToken ? vp.arrayAllVar(bt) : undefined, undefined, bt], arg1Var, resultVar);
 
             // TODO: array functions are generic (can be applied to any array-like object, including strings), can also be sub-classed
             break;
@@ -471,7 +442,7 @@ export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams,
                 solver.addSubsetConstraint(retVar, accVar);
 
                 // write array elements to currentValue
-                modelCall([accVar, bt instanceof ArrayToken ? vp.arrayAllVar(bt) : undefined, undefined, pBaseVar], undefined, pResultVar);
+                modelCall([accVar, bt instanceof ArrayToken ? vp.arrayAllVar(bt) : undefined, undefined, bt], undefined, pResultVar);
             }
             break;
         case "Array.prototype.sort":
@@ -481,26 +452,17 @@ export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams,
                 // TODO: also change known entries
                 modelCall([btVar, btVar]);
             }
-            solver.addSubsetConstraint(pBaseVar, pResultVar);
+            solver.addTokenConstraint(bt, pResultVar);
             break;
         case "Map.prototype.forEach":
             if (bt.kind === "Map" && ft instanceof FunctionToken)
-                modelCall([vp.objPropVar(bt, MAP_VALUES), vp.objPropVar(bt, MAP_KEYS), pBaseVar], arg1Var);
+                modelCall([vp.objPropVar(bt, MAP_VALUES), vp.objPropVar(bt, MAP_KEYS), bt], arg1Var);
             break;
         case "Set.prototype.forEach":
             if (bt.kind === "Set" && ft instanceof FunctionToken)
                 // TODO: what if called via e.g. bind? (same for other baseVar constraints above)
-                modelCall([vp.objPropVar(bt, SET_VALUES), vp.objPropVar(bt, SET_VALUES), pBaseVar], arg1Var);
+                modelCall([vp.objPropVar(bt, SET_VALUES), vp.objPropVar(bt, SET_VALUES), bt], arg1Var);
             break;
-        case "new Promise": {
-            // use labels that are independent of bt and ft to reduce number of variables
-            const resolveFunVar = vp.intermediateVar(p.path.node, `NativeCallback(${kind}): resolve`);
-            solver.addTokenConstraint(newObject("PromiseResolve", p.globalSpecialNatives.get(FUNCTION_PROTOTYPE)!, p), resolveFunVar);
-            const rejectFunVar = vp.intermediateVar(p.path.node, `NativeCallback(${kind}): reject`);
-            solver.addTokenConstraint(newObject("PromiseReject", p.globalSpecialNatives.get(FUNCTION_PROTOTYPE)!, p), rejectFunVar);
-            modelCall([resolveFunVar, rejectFunVar]);
-            break;
-        }
         case "Promise.prototype.then$onFulfilled":
         case "Promise.prototype.then$onRejected":
         case "Promise.prototype.catch$onRejected":
@@ -524,8 +486,7 @@ export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams,
                     break;
             }
             // create a new promise
-            const thenPromise = a.canonicalizeToken(new AllocationSiteToken("Promise", p.path.node));
-            solver.addInherits(thenPromise, p.globalSpecialNatives.get(PROMISE_PROTOTYPE)!);
+            const thenPromise = newObject("Promise", p.globalSpecialNatives.get(PROMISE_PROTOTYPE)!, p);
 
             if (ft instanceof FunctionToken) {
                 // assign promise fulfilled/rejected value to the callback parameter and add call edge
@@ -568,14 +529,8 @@ type CallApplyKind = "Function.prototype.call" | "Function.prototype.apply";
  * Models 'call' or 'apply'.
  */
 export function invokeCallApply(kind: CallApplyKind, p: NativeFunctionParams) {
-    const bp = getBaseAndProperty(p.path);
-    if (bp) {
-        const funVar = p.solver.varProducer.expVar(bp.base, p.path);
-        p.solver.addForAllTokensConstraint(funVar, TokenListener.NATIVE_INVOKE_CALL_APPLY, p.path.node, (ft: Token) => {
-            if (ft instanceof FunctionToken || ft instanceof NativeObjectToken)
-                invokeCallApplyBound(kind, p, ft);
-        });
-    }
+    if (p.base instanceof FunctionToken || p.base instanceof NativeObjectToken)
+        invokeCallApplyBound(kind, p, p.base);
 }
 
 export function invokeCallApplyBound(kind: CallApplyKind, p: NativeFunctionParams, ft: FunctionToken | NativeObjectToken) {
@@ -618,7 +573,17 @@ export function invokeCallApplyBound(kind: CallApplyKind, p: NativeFunctionParam
                                 p.solver.fragmentState.registerEscapingFromModule(opv);
                             }
                         });
-                        // TODO: p.solver.addSubsetConstraint(vp.arrayValueVar(t), ...);
+
+                        if (escapes) {
+                            const unk = p.solver.varProducer.arrayUnknownVar(t);
+                            p.solver.fragmentState.registerEscapingFromModule(unk);
+                        }
+
+                        for (const param of ft.fun.params)
+                            if (isIdentifier(param)) { // TODO: non-Identifier parameters?
+                                const unk = p.solver.varProducer.arrayUnknownVar(t);
+                                p.solver.addSubsetConstraint(unk, p.solver.varProducer.nodeVar(param));
+                            }
                     }
                 });
             }
@@ -639,21 +604,15 @@ export function invokeCallApplyBound(kind: CallApplyKind, p: NativeFunctionParam
 export function functionBind(p: NativeFunctionParams) {
     const args = p.path.node.arguments;
     const basearg = args[0];
-    const bp = getBaseAndProperty(p.path);
-    if (bp) {
-        const funVar = p.solver.varProducer.expVar(bp.base, p.path);
-        p.solver.addForAllTokensConstraint(funVar, TokenListener.NATIVE_INVOKE_BIND, p.path.node, (ft: Token) => {
-            if (ft instanceof FunctionToken) { // TODO: ignoring native functions etc.
-                if (isExpression(basearg)) { // TODO:SpreadElement? non-MemberExpression?
-                    // base value
-                    const baseVar = p.solver.varProducer.expVar(basearg, p.path);
-                    p.solver.addSubsetConstraint(baseVar, p.solver.varProducer.thisVar(ft.fun)); // TODO: only bind 'this' if the callback is a proper function (not a lambda?)
-                }
-                // TODO: also model conversion for basearg to objects, see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/bind
-            }
-        });
+    if (p.base instanceof FunctionToken) { // TODO: ignoring native functions etc.
+        if (isExpression(basearg)) { // TODO:SpreadElement? non-MemberExpression?
+            // base value
+            const baseVar = p.solver.varProducer.expVar(basearg, p.path);
+            p.solver.addSubsetConstraint(baseVar, p.solver.varProducer.thisVar(p.base.fun)); // TODO: only bind 'this' if the callback is a proper function (not a lambda?)
+        }
+        // TODO: also model conversion for basearg to objects, see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/bind
         // return value
-        p.solver.addSubsetConstraint(p.solver.varProducer.expVar(bp.base, p.path), p.solver.varProducer.expVar(p.path.node, p.path));
+        p.solver.addTokenConstraint(p.base, p.solver.varProducer.expVar(p.path.node, p.path));
     }
     if (!args.every(arg => isExpression(arg)))
         warnNativeUsed("Function.prototype.bind", p, "with SpreadElement"); // TODO: SpreadElement
@@ -708,14 +667,9 @@ export function assignIteratorMapValuePairs(param: number, t: AllocationSiteToke
  * Models flow from values of the base array to the given array, in unknown order.
  */
 export function assignBaseArrayValueToArray(t: ArrayToken, p: NativeFunctionParams) {
-    const bp = getBaseAndProperty(p.path);
-    if (bp) {
-        const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
+    if (p.base instanceof ArrayToken) {
         const dst = p.solver.varProducer.arrayUnknownVar(t);
-        p.solver.addForAllTokensConstraint(baseVar, TokenListener.NATIVE_9, p.path.node, (t2: Token) => {
-            if (t2 instanceof ArrayToken)
-                p.solver.addSubsetConstraint(p.solver.varProducer.arrayAllVar(t2), dst);
-        });
+        p.solver.addSubsetConstraint(p.solver.varProducer.arrayAllVar(p.base), dst);
     }
 }
 
@@ -723,16 +677,12 @@ export function assignBaseArrayValueToArray(t: ArrayToken, p: NativeFunctionPara
  * Models flow from values of array values of the base array to the given array, in unknown order.
  */
 export function assignBaseArrayArrayValueToArray(t: ArrayToken, p: NativeFunctionParams) {
-    const bp = getBaseAndProperty(p.path);
-    if (bp) {
-        const baseVar = p.solver.varProducer.expVar(bp.base, p.path);
-        const dst = p.solver.varProducer.arrayUnknownVar(t);
-        p.solver.addForAllTokensConstraint(baseVar, TokenListener.NATIVE_10, p.path.node, (t2: Token) => {
-            if (t2 instanceof ArrayToken)
-                p.solver.addForAllTokensConstraint(p.solver.varProducer.arrayAllVar(t2), TokenListener.NATIVE_11, p.path.node, (t3: Token) => {
-                    if (t3 instanceof ArrayToken)
-                        p.solver.addSubsetConstraint(p.solver.varProducer.arrayAllVar(t3), dst);
-                });
+    if (p.base instanceof ArrayToken) {
+        p.solver.addForAllTokensConstraint(p.solver.varProducer.arrayAllVar(p.base), TokenListener.NATIVE_11, {n: p.path.node, t}, (t2: Token) => {
+            if (t2 instanceof ArrayToken) {
+                const dst = p.solver.varProducer.arrayUnknownVar(t);
+                p.solver.addSubsetConstraint(p.solver.varProducer.arrayAllVar(t2), dst);
+            }
         });
     }
 }
@@ -740,13 +690,17 @@ export function assignBaseArrayArrayValueToArray(t: ArrayToken, p: NativeFunctio
 /**
  * Models call to a promise executor.
  */
-export function callPromiseExecutor(promise: AllocationSiteToken | PackageObjectToken, p: NativeFunctionParams) {
+export function callPromiseExecutor(p: NativeFunctionParams) {
     const args = p.path.node.arguments;
     if (args.length >= 1 && isExpression(args[0])) { // TODO: SpreadElement? non-MemberExpression?
         const funVar = p.solver.varProducer.expVar(args[0], p.path);
+        const caller = p.solver.globalState.getEnclosingFunctionOrModule(p.path, p.moduleInfo);
         p.solver.addForAllTokensConstraint(funVar, TokenListener.CALL_PROMISE_EXECUTOR, p.path.node, (t: Token) => {
             if (t instanceof FunctionToken)
-                invokeCallbackBound("new Promise", p, promise, t, undefined);
+                p.op.callFunctionTokenBound(t, undefined, caller, [
+                    newObject("PromiseResolve", p.globalSpecialNatives.get(FUNCTION_PROTOTYPE)!, p),
+                    newObject("PromiseReject", p.globalSpecialNatives.get(FUNCTION_PROTOTYPE)!, p),
+                ], undefined, false, p.path, {native: true});
         });
     }
 }
@@ -763,7 +717,7 @@ export function callPromiseResolve(t: AllocationSiteToken, args: CallExpression[
             switch (t.kind) {
                 case "PromiseResolve":
                     // for all argument values...
-                    op.solver.addForAllTokensConstraint(arg, TokenListener.CALL_PROMISE_RESOLVE, path.node, (vt: Token) => {
+                    op.solver.addForAllTokensConstraint(arg, TokenListener.CALL_PROMISE_RESOLVE, {n: path.node, t: promise}, (vt: Token) => {
                         const vp = op.solver.varProducer;
                         if (vt instanceof AllocationSiteToken && vt.kind === "Promise") {
                             // argument is a promise, transfer its values to the current promise
@@ -925,7 +879,7 @@ export function setPrototypeOf(p: NativeFunctionParams) {
 }
 
 /**
- * Models the behavior of Object.assign
+ * Models the behavior of Object.assign.
  */
 export function assignProperties(target: Expression, sources: Array<Node>, p: NativeFunctionParams) {
     const tVar = p.op.expVar(target, p.path);
@@ -957,12 +911,11 @@ export function assignProperties(target: Expression, sources: Array<Node>, p: Na
     p.solver.addForAllTokensConstraint(sVar, TokenListener.NATIVE_ASSIGN_PROPERTIES, node, (s: Token) => {
         if (isObjectPropertyVarObj(s))
             p.solver.addForAllObjectPropertiesConstraint(s, TokenListener.NATIVE_ASSIGN_PROPERTIES2, node, (prop: string) => {
-                const iVar = p.solver.varProducer.intermediateVar(node, `Object.assign: ${prop}`);
-                p.op.readPropertyBound(s, sVar, prop, iVar, node, enclosing, prop);
-
-                p.solver.addForAllTokensConstraint(tVar, TokenListener.NATIVE_ASSIGN_PROPERTIES3, node, (t: Token) => {
-                    p.op.writeProperty(iVar, tVar, t, prop, node, enclosing, node, "normal", true);
-                }, prop);
+                const iVar = p.solver.varProducer.intermediateVar(node, `Object.assign:${prop}`);
+                p.op.readPropertyBound(s, prop, iVar, {n: node, s: prop}, enclosing);
+                p.solver.addForAllTokensConstraint(tVar, TokenListener.NATIVE_ASSIGN_PROPERTIES3, {n: node, s: prop}, (t: Token) => {
+                    p.op.writeProperty(iVar, tVar, t, prop, node, enclosing);
+                });
             });
     });
 
@@ -980,12 +933,13 @@ type PreparedDefineProperty = {
     ivar: IntermediateVar
 };
 
-/*
+/**
  * Reads values from a property descriptor into intermediate constraint variables
  * that can be assigned (via subset edges) to properties of objects.
  * @param name the name of the native function that is modeled
  * @param prop the property name associated with the property descriptor
  * @param descriptor constraint variable for the property descriptor object
+ * @param p NativeFunctionParams
  */
 export function prepareDefineProperty(
     name: "Object.defineProperty" | "Object.defineProperties" | "Object.create",
@@ -1004,12 +958,13 @@ export function prepareDefineProperty(
     });
 }
 
-/*
+/**
  * Reads values from an object literal containing property descriptors as values into
  * intermediate constraint variables that can be assigned (via subset edges) to
  * properties of objects.
  * @param name the name of the native function that is modeled
  * @param props AST node of the object literal containing property descriptors
+ * @param p NativeFunctionParams
  */
 export function prepareDefineProperties(
     name: "Object.defineProperties" | "Object.create",
@@ -1046,11 +1001,12 @@ export function prepareDefineProperties(
     });
 }
 
-/*
+/**
  * Assigns values collected from property descriptors to the objects in the given constraint variable.
  * @param obj the object token or the expression that holds objects that properties should be written to
  * @param key TokenListener to use for the constraint
  * @param ivars prepared values from property descriptors
+ * @param p NativeFunctionParams
  */
 export function defineProperties(
     obj: Expression | ObjectPropertyVarObj,

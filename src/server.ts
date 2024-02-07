@@ -58,7 +58,7 @@ const VERSION = require("../package.json").version;
 program
     .name("jelly-server")
     .version(VERSION)
-    .addHelpText("before", "Copyright (C) 2023 Anders Møller\n")
+    .addHelpText("before", "Copyright (C) 2024 Anders Møller\n")
     .option("-f, --logfile <file>", "log file (default: $TMP/jelly-PID.log)")
     .option("-l, --loglevel <level>", "analysis log level (info/warn/error)", "error")
     .option("-r, --loglevel-server <level>", "server log level (verbose/info/error)", "info")
@@ -226,7 +226,7 @@ async function main() {
             solver = undefined;
             let gs, ps;
             if (globs || vulnerabilityDetector) {
-                gs = new Set<string>()
+                gs = new Set<string>();
                 addAll(globs, gs);
                 ps = new Set<string>();
                 addAll(props, ps);
@@ -305,7 +305,7 @@ async function main() {
                 return prepareResponse(false, req, {message: "Analysis results not available"});
             if (!options.apiUsage)
                 return prepareResponse(false, req, {message: "API usage not enabled, must be enabled before analyze"});
-            const [r1,] = getAPIUsage(solver.fragmentState);
+            const [r1] = getAPIUsage(solver.fragmentState);
             const body = convertAPIUsageToJSON(r1);
             const res: ApiUsageResponse = prepareResponse(true, req, {body});
             logger.info("Sending API usage");
@@ -359,7 +359,7 @@ async function main() {
                 return prepareResponse(false, req, {message: "Analysis results not available"});
             if (!options.callgraphHtml)
                 return prepareResponse(false, req, {message: "Option callgraphHtml not set"});
-            let vr: VulnerabilityResults = {};
+            const vr: VulnerabilityResults = {};
             if (vulnerabilityDetector && (options.vulnerabilities || options.vulnerabilitiesJSON)) {
                 const f = solver.fragmentState;
                 vr.package = vulnerabilityDetector.findPackagesThatMayDependOnVulnerablePackages(f);

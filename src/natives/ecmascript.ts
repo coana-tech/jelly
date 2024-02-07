@@ -36,6 +36,7 @@ import {
     widenArgument,
     defineProperties,
     assignProperties,
+    returnUnknown,
 } from "./nativehelpers";
 import {PackageObjectToken} from "../analysis/tokens";
 import {isExpression, isNewExpression, isStringLiteral} from "@babel/types";
@@ -796,8 +797,9 @@ export const ecmascriptModels: NativeModel = {
                     invoke: (p: NativeFunctionParams) => {
                         if (p.path.node.arguments.length > 1)
                             warnNativeUsed("JSON.parse", p, "with reviver"); // TODO
-                        returnPackageObject(p, "Object");
-                        returnPackageObject(p, "Array");
+                        // returnPackageObject(p, "Object");
+                        // returnPackageObject(p, "Array");
+                        returnUnknown(p); // TODO: better model for unknown JSON object/array?
                     }
                 },
                 {
@@ -1277,9 +1279,8 @@ export const ecmascriptModels: NativeModel = {
             name: "Promise",
             invoke: (p: NativeFunctionParams) => {
                 if (isNewExpression(p.path.node)) {
-                    const promise = newObject("Promise", p.globalSpecialNatives.get(PROMISE_PROTOTYPE)!, p);
-                    callPromiseExecutor(promise, p);
-                    returnToken(promise, p);
+                    callPromiseExecutor(p);
+                    returnToken(newObject("Promise", p.globalSpecialNatives.get(PROMISE_PROTOTYPE)!, p), p);
                 }
             },
             staticMethods: [
@@ -1375,8 +1376,75 @@ export const ecmascriptModels: NativeModel = {
             // TODO
         },
         {
-            name: "Reflect"
-            // TODO
+            name: "Reflect",
+            staticMethods: [
+                {
+                    name: "apply",
+                    invoke: (p: NativeFunctionParams) => {
+                        warnNativeUsed("Reflect.apply", p); // TODO
+                    }
+                },
+                {
+                    name: "construct",
+                    invoke: (p: NativeFunctionParams) => {
+                        warnNativeUsed("Reflect.construct", p); // TODO
+                    }
+                },
+                {
+                    name: "defineProperty",
+                    invoke: (p: NativeFunctionParams) => {
+                        warnNativeUsed("Reflect.defineProperty", p); // TODO
+                    }
+                },
+                {
+                    name: "deleteProperty"
+                },
+                {
+                    name: "get",
+                    invoke: (p: NativeFunctionParams) => {
+                        warnNativeUsed("Reflect.get", p); // TODO
+                    }
+                },
+                {
+                    name: "getOwnPropertyDescriptor",
+                    invoke: (p: NativeFunctionParams) => {
+                        warnNativeUsed("Reflect.getOwnPropertyDescriptor", p); // TODO
+                    }
+                },
+                {
+                    name: "getPrototypeOf",
+                    invoke: (p: NativeFunctionParams) => {
+                        warnNativeUsed("Reflect.getPrototypeOf", p); // TODO
+                    }
+                },
+                {
+                    name: "has"
+                },
+                {
+                    name: "isExtensible"
+                },
+                {
+                    name: "ownKeys",
+                    invoke: (p: NativeFunctionParams) => {
+                        warnNativeUsed("Reflect.ownKeys", p); // TODO
+                    }
+                },
+                {
+                    name: "preventExtensions"
+                },
+                {
+                    name: "set",
+                    invoke: (p: NativeFunctionParams) => {
+                        warnNativeUsed("Reflect.set", p); // TODO
+                    }
+                },
+                {
+                    name: "setPrototypeOf",
+                    invoke: (p: NativeFunctionParams) => {
+                        warnNativeUsed("Reflect.setPrototypeOf", p); // TODO
+                    }
+                },
+            ]
         },
         {
             name: "RegExp",

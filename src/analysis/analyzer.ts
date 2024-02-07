@@ -108,24 +108,21 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
 
                     solver.updateDiagnostics();
                 }
+
+                ast.tokens = undefined; // tokens are no longer needed, allow GC
             }
 
             if (!options.modulesOnly) {
 
                 // combine analysis states for all modules
                 solver.prepare();
-                const totalNumPackages = Array.from(a.packageInfos.values()).reduce((acc, p) =>
-                    acc + (Array.from(p.modules.values()).some(m => fragmentStates.has(m)) ? 1 : 0), 0);
                 for (const p of a.packageInfos.values()) {
                     await solver.checkAbort();
 
                     // skip the package if it doesn't contain any analyzed modules
                     if (!Array.from(p.modules.values()).some(m => fragmentStates.has(m)))
                         continue;
-
                     d.packages++;
-                    if (options.printProgress)
-                        logger.info(`Analyzing package ${p} (${d.packages}/${totalNumPackages})`);
 
                     // merge analysis state for each module
                     for (const m of p.modules.values())
@@ -135,6 +132,9 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
                     for (const d of p.directDependencies)
                         solver.addPackageNeighbor(p, d);
                 }
+
+                if (options.printProgress)
+                    logger.info("Analyzing combined modules");
 
                 // propagate tokens until fixpoint reached
                 await solver.propagate();
@@ -146,6 +146,7 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
                     await solver.propagate();
 
                 assert(a.pendingFiles.length === 0, "Unexpected module"); // (new modules shouldn't be discovered in the second phase)
+                solver.fragmentState.resolveGetterCalls();
                 solver.updateDiagnostics();
             }
         }
@@ -178,6 +179,7 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
         const f = solver.fragmentState; // current fragment (not final if aborted due to timeout)
         const r = new AnalysisStateReporter(f);
         d.callsWithUniqueCallee = r.getOneCalleeCalls();
+        d.callsWithMultipleCallees = r.getMultipleCalleeCalls();
         d.totalCallSites = f.callLocations.size;
         d.callsWithNoCallee = r.getZeroCalleeCalls().size;
         d.nativeOnlyCalls = r.getZeroButNativeCalleeCalls();
@@ -188,9 +190,11 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
         if (logger.isInfoEnabled()) {
             logger.info(`Analyzed packages: ${d.packages}, modules: ${d.modules}, functions: ${a.functionInfos.size}, code size: ${Math.ceil(d.codeSize / 1024)}KB`);
             logger.info(`Call edges function->function: ${f.numberOfFunctionToFunctionEdges}, call->function: ${f.numberOfCallToFunctionEdges}`);
-            const n = d.totalCallSites - d.callsWithNoCallee - d.nativeOnlyCalls - d.externalOnlyCalls - d.nativeOrExternalCalls;
-            logger.info(`Calls with unique callee: ${d.callsWithUniqueCallee}/${n}${n > 0 ? ` (${percent(d.callsWithUniqueCallee / n)})` : ""}` +
-                ` (excluding ${d.callsWithNoCallee} zero-callee, ${d.nativeOnlyCalls} native-only, ${d.externalOnlyCalls} external-only and ${d.nativeOrExternalCalls} native-or-external-only)`)
+            const total = d.totalCallSites, zeroOne = d.callsWithNoCallee + d.callsWithUniqueCallee, nativeExternal = d.nativeOnlyCalls + d.externalOnlyCalls + d.nativeOrExternalCalls;
+            if (total > 0)
+                logger.info(`Calls with zero or one callee: ${zeroOne}/${total} (${percent(zeroOne / total)}), ` +
+                    `multiple: ${d.callsWithMultipleCallees}/${total} (${percent(d.callsWithMultipleCallees / total)}), ` +
+                    `native or external: ${nativeExternal}/${total} (${percent(nativeExternal / total)})`);
             logger.info(`Functions with zero callers: ${d.functionsWithZeroCallers}/${a.functionInfos.size}${a.functionInfos.size > 0 ? ` (${percent(d.functionsWithZeroCallers / a.functionInfos.size)})` : ""}, ` +
                 `reachable functions: ${d.reachableFunctions}/${a.functionInfos.size}${a.functionInfos.size > 0 ? ` (${percent(d.reachableFunctions / a.functionInfos.size)})` : ""}`);
             logger.info(`Analysis time: ${d.time}ms, memory usage: ${d.maxMemoryUsage}MB${!options.gc ? " (without --gc)" : ""}`);
@@ -201,7 +205,6 @@ export async function analyzeFiles(files: Array<string>, solver: Solver) {
                     logger.info(`Fixpoint round limit reached: ${d.roundLimitReached} time${d.roundLimitReached !== 1 ? "s" : ""}`);
                 logger.info(`Constraint vars: ${f.getNumberOfVarsWithTokens()} (${f.vars.size}), tokens: ${f.numberOfTokens}, subset edges: ${f.numberOfSubsetEdges}, max tokens: ${f.getLargestTokenSetSize()}, max subset out: ${f.getLargestSubsetEdgeOutDegree()}, redirections: ${f.redirections.size}`);
                 logger.info(`Listeners (notifications) token: ${mapMapSize(f.tokenListeners)} (${d.tokenListenerNotifications}), ` +
-                    `pair: ${mapMapSize(f.pairListeners1) + mapMapSize(f.pairListeners2)} (${d.pairListenerNotifications}), ` +
                     (options.readNeighbors ? `neighbor: ${mapMapSize(f.packageNeighborListeners)} (${d.packageNeighborListenerNotifications}), ` : "") +
                     `array: ${mapMapSize(f.arrayEntriesListeners)} (${d.arrayEntriesListenerNotifications}), ` +
                     `obj: ${mapMapSize(f.objectPropertiesListeners)} (${d.objectPropertiesListenerNotifications})`);
