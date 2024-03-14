@@ -1,8 +1,8 @@
-import {ConstraintVar, IntermediateVar, NodeVar, ObjectPropertyVarObj, isObjectPropertyVarObj} from "./constraintvars";
+import {ConstraintVar, IntermediateVar, isObjectPropertyVarObj, NodeVar, ObjectPropertyVarObj} from "./constraintvars";
 import logger, {isTTY, writeStdOut} from "../misc/logger";
 import {AccessPathToken, ArrayToken, ObjectToken, PackageObjectToken, Token} from "./tokens";
 import {GlobalState} from "./globalstate";
-import {FunctionInfo, ModuleInfo, PackageInfo} from "./infos";
+import {PackageInfo} from "./infos";
 import {
     addAll,
     addAllMapHybridSet,
@@ -22,7 +22,15 @@ import {
     strHash,
 } from "../misc/util";
 import assert from "assert";
-import {AccessPath, CallResultAccessPath, ComponentAccessPath, IgnoredAccessPath, ModuleAccessPath, PropertyAccessPath, UnknownAccessPath} from "./accesspaths";
+import {
+    AccessPath,
+    CallResultAccessPath,
+    ComponentAccessPath,
+    IgnoredAccessPath,
+    ModuleAccessPath,
+    PropertyAccessPath,
+    UnknownAccessPath
+} from "./accesspaths";
 import {isAssignmentExpression, isNode, Node} from "@babel/types";
 import {FragmentState, ListenerID, MergeRepresentativeVar, RepresentativeVar} from "./fragmentstate";
 import {TokenListener} from "./listeners";
@@ -418,7 +426,7 @@ export default class Solver {
      * The key, the token, the node and the string must together uniquely determine the function.
      */
     addForAllAncestorsConstraint(t: ObjectPropertyVarObj,
-                                 key: TokenListener.READ_ANCESTORS | TokenListener.ASSIGN_ANCESTORS | TokenListener.CALL_FUNCTION_ANCESTORS,
+                                 key: TokenListener.READ_ANCESTORS | TokenListener.READ_ANCESTORS_GETTERS | TokenListener.ASSIGN_ANCESTORS | TokenListener.CALL_FUNCTION_ANCESTORS,
                                  opts: Omit<ListenerKey, "l" | "t">, listener: (ancestor: Token) => void) {
         if (logger.isDebugEnabled())
             logger.debug(`Adding ancestors constraint to ${t} ${opts.n ? `at ${nodeToString(opts.n)}` : `${TokenListener[key]} ${opts.s}`}`);
@@ -596,12 +604,10 @@ export default class Solver {
      * @param base the constraint variable for the base expression
      * @param pck the current package object token
      * @param prop the property name
-     * @param node the AST node for the property read operation
-     * @param enclosing enclosing function or module
      */
     collectPropertyRead(
         typ: "read" | "call", result: ConstraintVar | undefined, base: ConstraintVar | undefined,
-        pck: PackageObjectToken, prop: string | undefined, node: Node, enclosing: FunctionInfo | ModuleInfo,
+        pck: PackageObjectToken, prop: string | undefined
     ) { // TODO: rename to registerPropertyRead, move to FragmentState
         if (typ === "read" && result && base)
             this.fragmentState.maybeEmptyPropertyReads.push({typ, result, base, pck, prop});
@@ -609,8 +615,6 @@ export default class Solver {
             // call with @Unknown already happens when prop is undefined, so we only need to register
             // the property read for patching if the property is known
             this.fragmentState.maybeEmptyPropertyReads.push({typ, base, prop});
-        if (base && prop && prop !== "prototype")
-            this.fragmentState.propertyReads.add({base, prop, node, enclosing});
     }
 
     /**
@@ -628,7 +632,7 @@ export default class Solver {
      * Assumes that there is a subset path from v to rep.
      *
      * The caller should carefully observe that once the function returns, v is likely not a representative
-     * any more, but v's type will not reflect this fact.
+     * anymore, but v's type will not reflect this fact.
      * Do not use v as a representative after calling redirect!
      *
      * @param v constraint variable to redirect
@@ -641,9 +645,6 @@ export default class Solver {
         if (v === rep)
             return;
 
-        // TODO: remove these - they are guaranteed by the RepresentativeVar invariant
-        assert(f.isRepresentative(v) && f.isRepresentative(rep));
-        assert(f.getRepresentative(v) === v && f.getRepresentative(rep) === rep);
         if (logger.isDebugEnabled())
             logger.debug(`Redirecting ${v} to ${rep}`);
 
@@ -976,7 +977,6 @@ export default class Solver {
         f.numberOfFunctionToFunctionEdges += s.numberOfFunctionToFunctionEdges;
         f.numberOfCallToFunctionEdges += s.numberOfCallToFunctionEdges;
         addAll(s.functionsWithArguments, f.functionsWithArguments);
-        addAll(s.functionsWithThis, f.functionsWithThis);
         f.artificialFunctions.push(...s.artificialFunctions);
         addAll(s.callLocations, f.callLocations);
         setAll(s.maybeEmptyMethodCalls, f.maybeEmptyMethodCalls);
@@ -1000,7 +1000,6 @@ export default class Solver {
         mapMapSetAll(s.callResultAccessPaths, f.callResultAccessPaths);
         mapMapSetAll(s.componentAccessPaths, f.componentAccessPaths);
         mapArrayPushAll(s.importDeclRefs, f.importDeclRefs);
-        addAll(s.propertyReads, f.propertyReads);
         f.maybeEmptyPropertyReads.push(...s.maybeEmptyPropertyReads);
         addAll(s.dynamicPropertyWrites, f.dynamicPropertyWrites);
         this.printDiagnostics();

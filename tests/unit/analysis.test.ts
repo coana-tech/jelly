@@ -160,12 +160,12 @@ describe("tests/unit/analysis", () => {
             solver.addTokenConstraint(at, solver.varProducer.returnVar(fun0));
 
             const op = new Operations(m.getPath(), solver, new Map());
-            const r2 = op.readPropertyFromChain(ot2, "A");
+            const r2 = op.readPropertyFromChain(ot2, "A", param, m);
             await solver.propagate();
             expect(getTokens(r2)).toEqual([at]);
 
             // both tokens should be able to read from the getter(s)
-            const r1 = op.readPropertyFromChain(ot1, "A");
+            const r1 = op.readPropertyFromChain(ot1, "A", param, m);
             await solver.propagate();
             expect(getTokens(r1)).toEqual([at]);
         });
@@ -190,7 +190,6 @@ describe("tests/unit/analysis", () => {
         test("module.exports = function", () => {
             const {solver, a, f, getTokens} = setup;
 
-            f.functionsWithThis.add(fun1);
             solver.addTokenConstraint(a.canonicalizeToken(new FunctionToken(fun1)), vExports);
             expect([...f.vars]).toContain(vExports);
 
@@ -497,8 +496,8 @@ describe("tests/unit/analysis", () => {
                     solver.redirect(res1, res2);
                 }
 
-                solver.collectPropertyRead("read", res1, base1, pt, "A", param, m);
-                solver.collectPropertyRead("read", res2, base2, pt, "A", param, m);
+                solver.collectPropertyRead("read", res1, base1, pt, "A");
+                solver.collectPropertyRead("read", res2, base2, pt, "A");
                 solver.collectDynamicPropertyWrite(base1);
                 solver.addTokenConstraint(ot, base1);
                 solver.addTokenConstraint(ot, base2);

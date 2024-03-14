@@ -245,7 +245,6 @@ export function returnIterator(kind: IteratorKind, p: NativeFunctionParams) { //
             p.solver.addTokenConstraint(iter, vp.expVar(p.path.node, p.path));
             const iterNext = vp.objPropVar(iter, "next");
             p.solver.addTokenConstraint(p.globalSpecialNatives.get(GENERATOR_PROTOTYPE_NEXT)!, iterNext);
-            const iterValue = vp.objPropVar(iter, "value");
             switch (kind) {
                 case "ArrayKeys": {
                     if (t.kind !== "Array")
@@ -256,6 +255,7 @@ export function returnIterator(kind: IteratorKind, p: NativeFunctionParams) { //
                 case "ArrayValues": {
                     if (t.kind !== "Array")
                         break;
+                    const iterValue = vp.objPropVar(iter, "value");
                     p.solver.addSubsetConstraint(vp.arrayAllVar(t), iterValue);
                     break;
                 }
@@ -264,6 +264,7 @@ export function returnIterator(kind: IteratorKind, p: NativeFunctionParams) { //
                         break;
                     const pair = a.canonicalizeToken(new ArrayToken(p.path.node)); // TODO: see newArrayToken
                     p.solver.addInherits(t, p.globalSpecialNatives.get(ARRAY_PROTOTYPE)!);
+                    const iterValue = vp.objPropVar(iter, "value");
                     p.solver.addTokenConstraint(pair, iterValue);
                     const oneVar = vp.objPropVar(pair, "1");
                     p.solver.addSubsetConstraint(vp.arrayAllVar(t), oneVar);
@@ -272,6 +273,7 @@ export function returnIterator(kind: IteratorKind, p: NativeFunctionParams) { //
                 case "SetValues": {
                     if (t.kind !== "Set")
                         break;
+                    const iterValue = vp.objPropVar(iter, "value");
                     p.solver.addSubsetConstraint(vp.objPropVar(t, SET_VALUES), iterValue);
                     break;
                 }
@@ -280,6 +282,7 @@ export function returnIterator(kind: IteratorKind, p: NativeFunctionParams) { //
                         break;
                     const pair = a.canonicalizeToken(new ArrayToken(p.path.node)); // TODO: see newArrayToken
                     p.solver.addInherits(t, p.globalSpecialNatives.get(ARRAY_PROTOTYPE)!);
+                    const iterValue = vp.objPropVar(iter, "value");
                     p.solver.addTokenConstraint(pair, iterValue);
                     p.solver.addSubsetConstraint(vp.objPropVar(t, SET_VALUES), vp.objPropVar(pair, "0"));
                     p.solver.addSubsetConstraint(vp.objPropVar(t, SET_VALUES), vp.objPropVar(pair, "1"));
@@ -288,12 +291,14 @@ export function returnIterator(kind: IteratorKind, p: NativeFunctionParams) { //
                 case "MapKeys": {
                     if (t.kind !== "Map")
                         break;
+                    const iterValue = vp.objPropVar(iter, "value");
                     p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_KEYS), iterValue);
                     break;
                 }
                 case "MapValues": {
                     if (t.kind !== "Map")
                         break;
+                    const iterValue = vp.objPropVar(iter, "value");
                     p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_VALUES), iterValue);
                     break;
                 }
@@ -302,6 +307,7 @@ export function returnIterator(kind: IteratorKind, p: NativeFunctionParams) { //
                         break;
                     const pair = a.canonicalizeToken(new ArrayToken(p.path.node)); // TODO: see newArrayToken
                     p.solver.addInherits(t, p.globalSpecialNatives.get(ARRAY_PROTOTYPE)!);
+                    const iterValue = vp.objPropVar(iter, "value");
                     p.solver.addTokenConstraint(pair, iterValue);
                     p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_KEYS), vp.objPropVar(pair, "0"));
                     p.solver.addSubsetConstraint(vp.objPropVar(t, MAP_VALUES), vp.objPropVar(pair, "1"));
@@ -628,7 +634,7 @@ export function assignIteratorValuesToProperty(param: number, t: AllocationSiteT
     if (isExpression(arg)) { // TODO: non-Expression argument
         const src = p.op.expVar(arg, p.path);
         const dst = p.solver.varProducer.objPropVar(t, prop);
-        p.op.readIteratorValue(src, dst, p.path.node);
+        p.op.readIteratorValue(src, dst, arg); // using the argument node as allocation site for the iterator values
     }
 }
 
@@ -640,7 +646,7 @@ export function assignIteratorValuesToArrayValue(param: number, t: ArrayToken, p
     if (isExpression(arg)) { // TODO: non-Expression argument
         const src = p.op.expVar(arg, p.path);
         const dst = p.solver.varProducer.arrayUnknownVar(t);
-        p.op.readIteratorValue(src, dst, p.path.node);
+        p.op.readIteratorValue(src, dst, arg); // using the argument node as allocation site for the iterator values
     }
 }
 
@@ -652,7 +658,7 @@ export function assignIteratorMapValuePairs(param: number, t: AllocationSiteToke
     if (isExpression(arg)) { // TODO: non-Expression argument
         const src = p.op.expVar(arg, p.path);
         const dst = p.solver.varProducer.intermediateVar(p.path.node, "assignIteratorValuePairsToProperties");
-        p.op.readIteratorValue(src, dst, p.path.node);
+        p.op.readIteratorValue(src, dst, arg); // using the argument node as allocation site for the iterator values
         p.solver.addForAllTokensConstraint(dst, TokenListener.NATIVE_8, p.path.node.arguments[param], (t2: Token) => {
             if (t2 instanceof ArrayToken) {
                 if (keys)

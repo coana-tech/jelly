@@ -31,7 +31,6 @@ import {
     isAssignmentPattern,
     isCallExpression,
     isClassAccessorProperty,
-    isClassDeclaration,
     isClassExpression,
     isClassMethod,
     isClassPrivateMethod,
@@ -137,8 +136,6 @@ export function visit(ast: File, op: Operations) {
         ThisExpression(path: NodePath<ThisExpression>) {
 
             // this
-            f.registerThis(path);
-
             if (!options.oldobj) {
 
                 const encl = path.findParent((p: NodePath) =>
@@ -310,21 +307,16 @@ export function visit(ast: File, op: Operations) {
                 }
 
                 if (!options.oldobj) {
-
                     if (isFunctionDeclaration(path.node) || isFunctionExpression(path.node) || isClassMethod(path.node) || isClassPrivateMethod(path.node)) {
-                        // create prototype object
-                        const pt = op.newPrototypeToken(path.node);
-                        const ft = op.newFunctionToken(path.node);
+
+                        // create prototype object and instance object
+                        const pt = op.newPrototypeToken(fun);
+                        const ft = op.newFunctionToken(fun);
+                        const obj = op.newObjectToken(fun);
                         solver.addTokenConstraint(pt, vp.objPropVar(ft, "prototype"));
                         solver.addTokenConstraint(ft, vp.objPropVar(pt, "constructor"));
-                    }
-
-                    // if constructor for non-abstract class, make sure there is an instance
-                    if (cls && !(isClassDeclaration(cls) && cls.abstract)) {
-                        const obj = op.newObjectToken(fun);
-                        const proto = op.newPrototypeToken(fun);
+                        solver.addInherits(obj, pt);
                         solver.addTokenConstraint(obj, vp.thisVar(fun));
-                        solver.addInherits(obj, proto);
                     }
                 }
 

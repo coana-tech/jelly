@@ -8,13 +8,13 @@ describe("tests/helloworld", () => {
         soundness: "tests/helloworld/app.json",
         functionInfos: 775,
         moduleInfos: 94,
-        numberOfFunctionToFunctionEdges: 809,
-        oneCalleeCalls: 874,
-        funFound: 114,
+        numberOfFunctionToFunctionEdges: 861,
+        oneCalleeCalls: 930,
+        funFound: 115,
         funTotal: 138,
-        callFound: 163,
+        callFound: 165,
         callTotal: 204,
-        reachableFound: 122,
+        reachableFound: 138,
         reachableTotal: 189,
     });
 });
