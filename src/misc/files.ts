@@ -45,7 +45,7 @@ function* expandRec(path: string, sub: boolean): Generator<string> {
         const base = basename(path);
         if (!sub ||
             !(["node_modules", ".git", ".yarn"].includes(base) ||
-                (!inNodeModules && ["out", "build", "dist", "generated"].includes(base)))) {
+                (!inNodeModules && ["out", "build", "dist", "generated", "compiled"].includes(base)))) {
             const files = readdirSync(path); // TODO: use withFileTypes and dirent.isdirectory()
             if (!sub || inNodeModules || !files.includes("package.json"))
                 for (const file of files.map(f => resolve(path, f)).sort((f1, f2) => {
