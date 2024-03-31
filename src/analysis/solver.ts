@@ -1,8 +1,18 @@
 import {ConstraintVar, IntermediateVar, isObjectPropertyVarObj, NodeVar, ObjectPropertyVarObj} from "./constraintvars";
 import logger, {isTTY, writeStdOut} from "../misc/logger";
-import {AccessPathToken, ArrayToken, ObjectToken, PackageObjectToken, Token} from "./tokens";
+import {
+    AccessPathToken,
+    AllocationSiteToken,
+    ArrayToken,
+    ClassToken,
+    FunctionToken,
+    ObjectToken,
+    PackageObjectToken,
+    PrototypeToken,
+    Token
+} from "./tokens";
 import {GlobalState} from "./globalstate";
-import {PackageInfo} from "./infos";
+import {FunctionInfo, ModuleInfo, PackageInfo} from "./infos";
 import {
     addAll,
     addAllMapHybridSet,
@@ -42,7 +52,23 @@ import {setImmediate} from "timers/promises";
 import {getMemoryUsage} from "../misc/memory";
 import {JELLY_NODE_ID} from "../parsing/extras";
 import AnalysisDiagnostics from "./diagnostics";
-import {ARRAY_UNKNOWN, INTERNAL_PROTOTYPE, isInternalProperty} from "../natives/ecmascript";
+import {
+    ARRAY_PROTOTYPE,
+    ARRAY_UNKNOWN,
+    DATE_PROTOTYPE,
+    ERROR_PROTOTYPE,
+    FUNCTION_PROTOTYPE,
+    INTERNAL_PROTOTYPE,
+    isInternalProperty,
+    MAP_PROTOTYPE,
+    OBJECT_PROTOTYPE,
+    PROMISE_PROTOTYPE,
+    REGEXP_PROTOTYPE,
+    SET_PROTOTYPE,
+    WEAKMAP_PROTOTYPE,
+    WEAKREF_PROTOTYPE,
+    WEAKSET_PROTOTYPE
+} from "../natives/ecmascript";
 import {ConstraintVarProducer} from "./constraintvarproducer";
 
 export class AbortedException extends Error {}
@@ -349,15 +375,20 @@ export default class Solver {
         }
         f.vars.add(vRep);
     }
+
     /**
      * Enqueues a call to a token listener if it hasn't been done before.
      */
-    private callTokenListener(id: ListenerID, listener: (t: Token) => void, t: Token) {
+    private callTokenListener(id: ListenerID, listener: (t: Token) => void, t: Token, now?: boolean) {
         const s = mapGetSet(this.fragmentState.listenersProcessed, id);
         if (!s.has(t)) {
             s.add(t);
-            this.enqueueListenerCall([listener, t]);
-            this.diagnostics.tokenListenerNotifications++;
+            if (now)
+                listener(t);
+            else {
+                this.enqueueListenerCall([listener, t]);
+                this.diagnostics.tokenListenerNotifications++;
+            }
         }
     }
 
@@ -427,12 +458,46 @@ export default class Solver {
      * The key, the token, the node and the string must together uniquely determine the function.
      */
     addForAllAncestorsConstraint(t: ObjectPropertyVarObj,
-                                 key: TokenListener.READ_ANCESTORS | TokenListener.READ_ANCESTORS_GETTERS | TokenListener.ASSIGN_ANCESTORS,
+                                 key: TokenListener.READ_ANCESTORS | TokenListener.WRITE_ANCESTORS,
                                  opts: Omit<ListenerKey, "l" | "t">, listener: (ancestor: Token) => void) {
         if (logger.isDebugEnabled())
             logger.debug(`Adding ancestors constraint to ${t} ${opts.n ? `at ${nodeToString(opts.n)}` : `${TokenListener[key]} ${opts.s}`}`);
         const id = this.getListenerID({...opts, l: key, t});
-        this.callTokenListener(id, listener, t); // ancestry is reflexive
+        this.callTokenListener(id, listener, t, true); // ancestry is reflexive
+        const g = this.globalState.globalSpecialNatives;
+        if (g) { // (not set when called from unit tests)
+            if (t instanceof ObjectToken)
+                this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
+            else if (t instanceof ArrayToken) {
+                this.callTokenListener(id, listener, g.get(ARRAY_PROTOTYPE)!);
+                this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
+            } else if (t instanceof FunctionToken || t instanceof PrototypeToken || t instanceof ClassToken) {
+                this.callTokenListener(id, listener, g.get(FUNCTION_PROTOTYPE)!);
+                this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
+            } else if (t instanceof AllocationSiteToken) {
+                if (t.kind === "Promise")
+                    this.callTokenListener(id, listener, g.get(PROMISE_PROTOTYPE)!);
+                else if (t.kind === "Date")
+                    this.callTokenListener(id, listener, g.get(DATE_PROTOTYPE)!);
+                else if (t.kind === "RegExp")
+                    this.callTokenListener(id, listener, g.get(REGEXP_PROTOTYPE)!);
+                else if (t.kind === "Error")
+                    this.callTokenListener(id, listener, g.get(ERROR_PROTOTYPE)!);
+                else if (t.kind === "Map")
+                    this.callTokenListener(id, listener, g.get(MAP_PROTOTYPE)!);
+                else if (t.kind === "Set")
+                    this.callTokenListener(id, listener, g.get(SET_PROTOTYPE)!);
+                else if (t.kind === "WeakMap")
+                    this.callTokenListener(id, listener, g.get(WEAKMAP_PROTOTYPE)!);
+                else if (t.kind === "WeakSet")
+                    this.callTokenListener(id, listener, g.get(WEAKSET_PROTOTYPE)!);
+                else if (t.kind === "WeakRef")
+                    this.callTokenListener(id, listener, g.get(WEAKREF_PROTOTYPE)!);
+                else if (t.kind === "PromiseResolve" || t.kind === "PromiseReject")
+                    this.callTokenListener(id, listener, g.get(FUNCTION_PROTOTYPE)!);
+                this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
+            }
+        }
         this.addForAllTokensConstraintPrivate(
             this.fragmentState.getRepresentative(this.varProducer.ancestorsVar(t)),
             id, listener,
@@ -588,11 +653,10 @@ export default class Solver {
             if (prop === INTERNAL_PROTOTYPE()) {
                 // constraint: ∀ b ∈ ⟦a.__proto__⟧: {b} ∪ Ancestors(b) ⊆ Ancestors(a)
                 this.addForAllTokensConstraint(f.varProducer.objPropVar(a, prop), TokenListener.ANCESTORS, {t: a}, (b: Token) => {
-                    if (isObjectPropertyVarObj(b)) { // TODO: ignoring inheritance from access path tokens
-                        const aVar = this.varProducer.ancestorsVar(a);
-                        this.addTokenConstraint(b, aVar);
+                    const aVar = this.varProducer.ancestorsVar(a);
+                    this.addTokenConstraint(b, aVar);
+                    if (isObjectPropertyVarObj(b))
                         this.addSubsetConstraint(this.varProducer.ancestorsVar(b), aVar);
-                    }
                 });
             }
         }
@@ -605,17 +669,21 @@ export default class Solver {
      * @param base the constraint variable for the base expression
      * @param pck the current package object token
      * @param prop the property name
+     * @param node AST node
+     * @param enclosing enclosing function or module
      */
     collectPropertyRead(
         typ: "read" | "call", result: ConstraintVar | undefined, base: ConstraintVar | undefined,
-        pck: PackageObjectToken, prop: string | undefined
+        pck: PackageObjectToken | undefined, prop: string | undefined, node: Node, enclosing: FunctionInfo | ModuleInfo
     ) { // TODO: rename to registerPropertyRead, move to FragmentState
-        if (typ === "read" && result && base)
+        if (typ === "read" && result && base && pck)
             this.fragmentState.maybeEmptyPropertyReads.push({typ, result, base, pck, prop});
         else if (typ === "call" && base && prop)
             // call with @Unknown already happens when prop is undefined, so we only need to register
             // the property read for patching if the property is known
             this.fragmentState.maybeEmptyPropertyReads.push({typ, base, prop});
+        if (base && prop)
+            this.fragmentState.propertyReads.push({base, prop, node, enclosing});
     }
 
     /**
@@ -796,7 +864,9 @@ export default class Solver {
                 if (options.cycleElimination) {
                     // find vars that are end points of new or restored subset edges
                     const nodes = new Set<RepresentativeVar>();
-                    for (const v of [...this.nodesWithNewEdges, ...this.restored])
+                    for (const v of this.nodesWithNewEdges)
+                        nodes.add(f.getRepresentative(v));
+                    for (const v of this.restored)
                         nodes.add(f.getRepresentative(v));
                     if (nodes.size > 0) {
                         // find strongly connected components
@@ -892,6 +962,7 @@ export default class Solver {
      * Merges the given fragment state into the current fragment state.
      */
     merge(_s: FragmentState, propagate: boolean) { // TODO: reconsider use of 'propagate' flag
+        const timer = new Timer();
         // use a different type for s' representative variables to prevent accidental mixups
         const s = _s as unknown as FragmentState<MergeRepresentativeVar>;
         const f = this.fragmentState;
@@ -1002,8 +1073,10 @@ export default class Solver {
         mapMapSetAll(s.callResultAccessPaths, f.callResultAccessPaths);
         mapMapSetAll(s.componentAccessPaths, f.componentAccessPaths);
         mapArrayPushAll(s.importDeclRefs, f.importDeclRefs);
+        pushAll(s.propertyReads, f.propertyReads);
         pushAll(s.maybeEmptyPropertyReads, f.maybeEmptyPropertyReads);
         addAll(s.dynamicPropertyWrites, f.dynamicPropertyWrites);
         this.printDiagnostics();
+        this.diagnostics.totalFragmentMergeTime += timer.elapsedCPU();
     }
 }

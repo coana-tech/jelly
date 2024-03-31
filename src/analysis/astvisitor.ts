@@ -112,7 +112,6 @@ import {
     ARRAY_UNKNOWN,
     ASYNC_GENERATOR_PROTOTYPE_NEXT,
     GENERATOR_PROTOTYPE_NEXT,
-    INTERNAL_PROTOTYPE,
     PROMISE_FULFILLED_VALUES
 } from "../natives/ecmascript";
 import {Operations} from "./operations";
@@ -215,7 +214,7 @@ export function visit(ast: File, op: Operations) {
                     src = op.newPrototypeToken(constr);
                 }
             }
-            solver.addSubsetConstraint(vp.objPropVar(src, INTERNAL_PROTOTYPE()), vp.nodeVar(path.node));
+            solver.addSubsetConstraint(vp.ancestorsVar(src), vp.nodeVar(path.node));
         },
 
         Identifier(path: NodePath<Identifier>) {
@@ -729,10 +728,14 @@ export function visit(ast: File, op: Operations) {
                         if (options.objSpread) {
                             // it's enticing to rewrite the AST to use Object.assign, but assign invokes setters on the target object
                             const enclosing = a.getEnclosingFunctionOrModule(path, op.moduleInfo);
-                            solver.addForAllTokensConstraint(vp.expVar(p.argument, path), TokenListener.OBJECT_SPREAD, p, (t: Token) => {
-                                if (isObjectPropertyVarObj(t))
-                                    solver.addForAllObjectPropertiesConstraint(t, TokenListener.OBJECT_SPREAD, p, (prop: string) =>
-                                        op.readPropertyBound(t, prop, vp.objPropVar(ot, prop), {n: p, s: prop}, enclosing));
+                            const argVar = vp.expVar(p.argument, path);
+                            solver.addForAllTokensConstraint(argVar, TokenListener.OBJECT_SPREAD, p, (t: Token) => {
+                                if (isObjectPropertyVarObj(t)) {
+                                    solver.addForAllObjectPropertiesConstraint(t, TokenListener.OBJECT_SPREAD, path.node, (prop: string) => {
+                                        solver.collectPropertyRead("read", undefined, argVar, undefined, prop, path.node, enclosing);
+                                        op.readPropertyBound(t, prop, vp.objPropVar(ot, prop), {t: ot, s: prop});
+                                    });
+                                }
                             });
                         } else
                             f.warnUnsupported(p, "SpreadElement in ObjectExpression (use --obj-spread)");

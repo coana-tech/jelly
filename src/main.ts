@@ -6,7 +6,7 @@ import {program} from "commander";
 import logger, {logToFile, setLogLevel} from "./misc/logger";
 import {COPYRIGHT, options, PKG, setDefaultTrackedModules, setOptions, setPatternProperties, VERSION} from "./options";
 import {spawnSync} from "child_process";
-import path from "path";
+import path, {sep} from "path";
 import {autoDetectBaseDir, expand, writeStreamedStringify} from "./misc/files";
 import {tapirPatternMatch} from "./patternmatching/tapirpatterns";
 import {toDot} from "./output/graphviz";
@@ -62,7 +62,7 @@ program
     .option("--largest", "report largest token sets and subset relations")
     .option("--no-cycle-elimination", "disable cycle elimination")
     .option("--no-natives", "disable nonessential models of native libraries")
-    .option("--skip-graal-test", "skip graal-nodejs test (use with -d)")
+    .option("--test-graal", "test graal-nodejs (use with -d)")
     .option("--no-print-progress", "don't print analysis progress information")
     .option("--no-tty", "don't print solver progress for TTY")
     .option("--warnings-unsupported", "print warnings about unsupported features")
@@ -74,7 +74,7 @@ program
     .option("--higher-order-functions", "report higher-order functions")
     .option("--zeros", "report calls with zero callees and functions with zero callers")
     .option("--exclude-entries <glob...>", "files to exclude when specifying entry directories")
-    .option("--tracked-modules <glob...>", "modules to track usage of (default: empty unless using -p, -v or --api-usage)")
+    .option("--tracked-modules <glob...>", "modules to track usage of (default: auto-detect)")
     .option("--external-matches", "enable pattern matches from external code")
     .option("--no-callgraph-implicit", "omit implicit calls in call graph") // TODO: not yet including implicit valueOf/toString calls
     .option("--no-callgraph-native", "omit native calls in call graph") // TODO: not yet including the native functions themselves, only callbacks from native functions
@@ -87,7 +87,7 @@ program
     .option("--typescript-library-usage <file>", "save TypeScript library usage in JSON file, no analysis")
     .option("--modules-only", "report reachable packages and modules only, no analysis")
     .option("--compare-callgraphs", "compare two call graphs given as JSON files, no analysis")
-    .option("--reachability", "compare reachability as an additional call graph comparison metric (use with -s or --compare-callgraphs)")
+    .option("--reachability", "compare call graph reachability (use with -s or --compare-callgraphs)")
     .option("--assume-in-node-modules", "treat analyzed files as in node_modules")
     .option("--no-alloc", "disable allocation site abstraction")
     .option("--oldobj", "old object abstraction")
@@ -95,8 +95,8 @@ program
     .option("--patch-dynamics", "enable dynamic property access patching heuristic")
     .option("--patch-method-calls", "enable method call patching heuristic")
     .option("--read-neighbors", "enable package neighbor heuristic")
-    .option("--proto", "model assignments to the __proto__ property")
-    .option("--obj-spread", "model spread syntax for object literals ({...obj})")
+    .option("--proto", "enable model of assignments to the __proto__ property")
+    .option("--obj-spread", "enable model of spread syntax for object literals ({...obj})")
     .usage("[options] [files]")
     .addHelpText("after",
         "\nAll modules reachable by require/import from the given files are included in the analysis\n" +
@@ -156,8 +156,8 @@ async function main() {
     if (options.dynamic) {
 
         const graalHome = options.graalHome || process.env.GRAAL_HOME;
-        const node = graalHome ? path.resolve(graalHome, "bin/node") : "node";
-        if (!options.skipGraalTest) {
+        const node = graalHome ? path.resolve(graalHome, "bin", "node") : "node";
+        if (options.testGraal) {
             logger.info("Testing graal-nodejs");
             const t = spawnSync(node, ["-e", "process.exit(typeof Graal === 'object' ? 0 : -1)"]);
             if (t.status === null) {
@@ -187,7 +187,7 @@ async function main() {
             const file = path.resolve(program.args[0]);
             // use directory containing the analyzed file as basedir if unspecified
             cwd = options.basedir ? path.resolve(options.basedir) : path.dirname(file);
-            cmd = `${__dirname}/../bin/node`;
+            cmd = `${__dirname}${sep}..${sep}bin${sep}node`;
             args = [path.relative(cwd, file)].concat(program.args.slice(1));
         }
         const dyn = path.resolve(options.dynamic);
@@ -199,7 +199,7 @@ async function main() {
                 ...env,
                 JELLY_OUT: dyn,
                 GRAAL_HOME: graalHome ? path.resolve(graalHome) : undefined,
-                PATH: `${__dirname}/../bin${path.delimiter}${process.env.PATH}`,
+                PATH: `${__dirname}${sep}..${sep}bin${path.delimiter}${process.env.PATH}`,
             },
         });
         if (t.status === null) {
