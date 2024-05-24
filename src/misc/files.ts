@@ -1,4 +1,14 @@
-import {closeSync, existsSync, lstatSync, openSync, readdirSync, readFileSync, readSync, writeSync} from "fs";
+import {
+    closeSync,
+    existsSync,
+    lstatSync,
+    openSync,
+    readdirSync,
+    readFileSync,
+    readSync,
+    realpathSync,
+    writeSync
+} from "fs";
 import {basename, dirname, extname, relative, resolve, sep} from "path";
 import module from "module";
 import {options} from "../options";
@@ -8,6 +18,8 @@ import logger from "./logger";
 import {Node} from "@babel/types";
 import stringify from "stringify2stream";
 import {FragmentState} from "../analysis/fragmentstate";
+import {findPackageJson} from "./packagejson";
+import {GlobalState} from "../analysis/globalstate";
 
 /**
  * Expands the given list of file paths.
@@ -23,8 +35,9 @@ export function expand(paths: Array<string> | string): Array<string> {
     if (typeof paths === "string")
         paths = [paths];
     const res: Array<string> = [];
+    const visited: Set<string> = new Set();
     for (const path of paths)
-        for (const e of expandRec(resolve(path), false))
+        for (const e of expandRec(resolve(path), false, visited))
             res.push(e); // TODO: complain if e starts with "."? (happens if path is outside basedir)
     if (options.excludeEntries) {
         const excl = new Set(micromatch(res, options.excludeEntries));
@@ -37,9 +50,13 @@ export function expand(paths: Array<string> | string): Array<string> {
         return res;
 }
 
-function* expandRec(path: string, sub: boolean): Generator<string> {
+function* expandRec(path: string, sub: boolean, visited: Set<string>): Generator<string> {
+    path = realpathSync(path);
+    if (visited.has(path))
+        return;
+    visited.add(path);
     const stat = lstatSync(path);
-    const inNodeModules = options.assumeInNodeModules || path.includes("node_modules");
+    const inNodeModules = options.library || path.includes("node_modules");
     if (stat.isDirectory()) {
         const base = basename(path);
         if (!sub ||
@@ -51,7 +68,7 @@ function* expandRec(path: string, sub: boolean): Generator<string> {
                     // make sure files are ordered before directories
                     return (lstatSync(f1).isDirectory() ? 1 : 0) - (lstatSync(f2).isDirectory() ? 1 : 0) || f1.localeCompare(f2);
                 }))
-                    yield* expandRec(file, true);
+                    yield* expandRec(file, true, visited);
             else
                 logger.debug(`Skipping directory ${path}`);
         } else
@@ -68,7 +85,7 @@ function* expandRec(path: string, sub: boolean): Generator<string> {
 /**
  * Attempts to detect whether the given file is a Node.js shebang file.
  */
-function isShebang(path: string): boolean { // TODO: doesn't work with hacks like https://sambal.org/2014/02/passing-options-node-shebang-line/
+export function isShebang(path: string): boolean { // TODO: doesn't work with hacks like https://sambal.org/2014/02/passing-options-node-shebang-line/
     const fd = openSync(path, 'r');
     const buf = Buffer.alloc(256);
     readSync(fd, buf, 0, buf.length, 0);
@@ -82,17 +99,17 @@ function isShebang(path: string): boolean { // TODO: doesn't work with hacks lik
  * @return resolved file path if successful, undefined if file type not analyzable
  * @throws exception if the module is not found
  */
-export function requireResolve(str: string, file: FilePath, node: Node, f: FragmentState): FilePath | undefined {
+export function requireResolve(str: string, file: FilePath, a: GlobalState, node?: Node, f?: FragmentState): FilePath | undefined {
     if (str.endsWith(".less") || str.endsWith(".svg") || str.endsWith(".png") || str.endsWith(".css") || str.endsWith(".scss")) {
         logger.verbose(`Ignoring module '${str}' with special extension`);
         return undefined;
     } else if (str[0] === "/") {
-        f.error(`Ignoring absolute module path '${str}'`, node);
+        f?.error(`Ignoring absolute module path '${str}'`, node);
         return undefined;
     }
     let filepath;
     try {
-        filepath = f.a.tsModuleResolver.resolveModuleName(str, file);
+        filepath = a.tsModuleResolver.resolveModuleName(str, file);
         // TypeScript prioritizes .ts over .js, overrule if coming from a .js file
         if (file.endsWith(".js") && filepath.endsWith(".ts") && !str.endsWith(".ts")) {
             const p = filepath.substring(0, filepath.length - 3) + ".js";
@@ -108,10 +125,10 @@ export function requireResolve(str: string, file: FilePath, node: Node, f: Fragm
 
         if (!filepath)
             // see if the string refers to a package that is among those analyzed (and not in node_modules)
-            for (const p of f.a.packageInfos.values())
+            for (const p of a.packageInfos.values())
                 if (p.name === str)
                     if (filepath) {
-                        f.error(`Multiple packages named ${str} found, skipping module load`, node);
+                        f?.error(`Multiple packages named ${str} found, skipping module load`, node);
                         throw e;
                     } else {
                         filepath = resolve(p.dir, p.main || "index.js"); // https://nodejs.org/dist/latest-v8.x/docs/api/modules.html#modules_all_together
@@ -135,7 +152,7 @@ export function requireResolve(str: string, file: FilePath, node: Node, f: Fragm
         throw new Error(msg);
     }
     if (filepath.endsWith(".d.ts") || ![".js", ".jsx", ".es", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"].includes(extname(filepath))) {
-        f.warn(`Module '${filepath}' has unrecognized extension, skipping it`, node);
+        f?.warn(`Module '${filepath}' has unrecognized extension, skipping it`, node);
         return undefined;
     }
     if (logger.isDebugEnabled())
@@ -145,7 +162,7 @@ export function requireResolve(str: string, file: FilePath, node: Node, f: Fragm
 
 /**
  * Attempts to auto-detect basedir if not set explicitly.
- * If not set explicitly, basedir is first set to the nearest enclosing directory of the given files.
+ * If not set explicitly, basedir is set to the nearest enclosing directory of all the given files containing a package.json file.
  * If the resulting directory is inside a node_modules directory, that directory is used instead.
  * @param paths paths to entry files or directories
  * @return true if successful, false if failed
@@ -160,12 +177,17 @@ export function autoDetectBaseDir(paths: Array<string>): boolean {
     }
     if (paths.length === 0)
         return true;
-    let dir = resolve(process.cwd(), longestCommonPrefix(paths.map(p => lstatSync(p).isDirectory() ? p : dirname(p))));
-    const i = dir.lastIndexOf(`${sep}node_modules${sep}`);
+    const t = findPackageJson(resolve(process.cwd(), longestCommonPrefix(paths.map(p =>
+        lstatSync(p).isDirectory() ? p : dirname(p)))));
+    if (!t) {
+        logger.info("Can't auto-detect basedir, package.json not found (use option -b), aborting");
+        return false;
+    }
+    options.basedir = t.dir;
+    const i = options.basedir.lastIndexOf(`${sep}node_modules${sep}`);
     if (i !== -1)
-        dir = resolve(dir.substring(0, i), "node_modules");
-    options.basedir = dir;
-    logger.verbose(`Basedir auto-detected: ${dir}`);
+        options.basedir = resolve(options.basedir.substring(0, i), "node_modules");
+    logger.verbose(`Basedir auto-detected: ${options.basedir}`);
     return true;
 }
 

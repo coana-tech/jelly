@@ -157,6 +157,20 @@ export function mapGetArray<K, V>(m: Map<K, Array<V>> | WeakMap<any, Array<V>>, 
     return mt;
 }
 
+export function pushArraySingle<K, V>(m: Map<K, Array<V> | V>, k: K, v: V, vs: Array<V> | V | undefined): Array<V> | V {
+    if (Array.isArray(vs)) {
+        vs.push(v);
+        return vs;
+    }
+    if (vs === undefined) {
+        m.set(k, v);
+        return v;
+    }
+    const qs = [vs, v];
+    m.set(k, qs);
+    return qs;
+}
+
 export function getOrSet<K, V>(m: Map<K, V>, k: K, v: () => V): V
 export function getOrSet<K extends object, V>(m: WeakMap<K, V>, k: K, v: () => V): V
 export function getOrSet<K, V>(m: Map<K, V> | WeakMap<any, V>, k: K, v: () => V): V {
@@ -220,6 +234,25 @@ export function mapArrayAdd<K, V>(k: K, v: V, m: Map<K, Array<V>> | WeakMap<any,
     a.push(v);
 }
 
+export function mapArrayAddNoDuplicates<K, V>(k: K, v: V, m: Map<K, Array<V>>, eq: (v1: V, v2: V) => boolean): void {
+    let a = m.get(k);
+    if (!a) {
+        a = [];
+        m.set(k, a);
+    }
+    for (const w of a)
+        if (eq(v, w))
+            return;
+    a.push(v);
+}
+
+export function mapArraySize<K, V>(m: Map<K, Array<V>>): number {
+    let n = 0;
+    for (const v of m.values())
+        n += v.length;
+    return n;
+}
+
 export function deleteAll<T>(xs: Iterable<T>, s: Set<T>) {
     for (const x of xs)
         s.delete(x);
@@ -271,6 +304,19 @@ export function getMapHybridSetSize<K, V>(m: Map<K, V | Set<V>>): number {
         else
             c++;
     return c;
+}
+
+export function mapSetToPairArray<K, V>(x: Map<K, Set<V>>): Array<[K, V]> {
+    const res: Array<[K, V]> = [];
+    for (const [k, vs] of x)
+        for (const v of vs)
+            res.push([k, v]);
+    return res;
+}
+
+export function addPairArrayToMapSet<K,V>(from: Array<[K, V]>, to: Map<K, Set<V>>) {
+    for (const [k, v] of from)
+        mapGetSet(to, k).add(v);
 }
 
 /**
@@ -484,4 +530,8 @@ export function longestCommonPrefix(a: Array<string>): string {
     while (i < end && a[0][i] === a[size - 1][i])
         i++;
     return a[0].substring(0, i);
+}
+
+export function stringify(x: any): string {
+    return JSON.stringify(x, (_k, v) => typeof v === "bigint" ? Number(v / 1000000n) : v, 2);
 }

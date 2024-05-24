@@ -4,14 +4,16 @@ import * as Transport from 'winston-transport';
 import {options} from "../options";
 import {sep} from "path";
 
-const RED = "\x1b[31m";
-const YELLOW = "\x1b[33m";
-const DEFAULT = "\x1b[39m";
-const GREEN = "\x1b[32m";
-const CYAN = "\x1b[36m";
-const WHITE = "\x1b[97m";
-const RESET = "\x1b[0m";
-const CLEAR = "\u001b[0K";
+export const RED = "\x1b[31m";
+export const YELLOW = "\x1b[33m";
+export const DEFAULT = "\x1b[39m";
+export const GREEN = "\x1b[32m";
+export const CYAN = "\x1b[36m";
+export const WHITE = "\x1b[97m";
+export const GREY = "\x1b[90m";
+export const BOLD = "\x1b[1m";
+export const RESET = "\x1b[0m";
+export const CLEAR = "\x1b[0K";
 
 const colors: {
     [key: string]: string
@@ -23,15 +25,15 @@ const colors: {
     debug: CYAN,
 };
 
-export const isTTY = process.stdout.isTTY;
+const stdout = process.stdout; // read before sandboxing
+
+export const isTTY = stdout.isTTY;
 
 const logger = winston.createLogger({
     level: "info",
     format: winston.format.printf(({level, message}) =>
         isTTY && options?.tty && !options.logfile ? colors[level] + message + RESET + CLEAR : message),
-    transports: new winston.transports.Console({
-        stderrLevels: [] // change to ["error"] to direct error messages to stderr
-    })
+    transports: new winston.transports.Stream({stream: stdout})
 });
 
 export default logger;
@@ -50,7 +52,7 @@ export function logToFile(file?: string): Transport {
 }
 
 export function writeStdOut(s: string) {
-    process.stdout.write(WHITE + s.substring(0, process.stdout.columns) + RESET + CLEAR + "\r");
+    stdout.write(WHITE + BOLD + s.substring(0, stdout.columns) + RESET + CLEAR + "\r");
 }
 
 export function writeStdOutIfActive(s: string) {

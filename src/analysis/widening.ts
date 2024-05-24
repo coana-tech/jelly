@@ -3,7 +3,7 @@ import {ObjectToken, PackageObjectToken, Token} from "./tokens";
 import logger from "../misc/logger";
 import {AncestorsVar, ConstraintVar, ObjectPropertyVar, ReadResultVar} from "./constraintvars";
 import {addAll, getOrSet, mapGetMap} from "../misc/util";
-import Timer from "../misc/timer";
+import Timer, {nanoToMs} from "../misc/timer";
 import {CallResultAccessPath, ComponentAccessPath, PropertyAccessPath} from "./accesspaths";
 import assert from "assert";
 
@@ -45,13 +45,19 @@ export function widenObjects(widened: Set<ObjectToken>, solver: Solver) {
         return res;
     }
 
-    function widenTokenMapArrayValues<K>(m: Map<K, Array<Token>>): [Map<K, Array<Token>>, number] {
-        const res: Map<K, Array<Token>> = new Map;
+    function widenTokenMapArrayValues<K>(m: Map<K, Array<Token> | Token>): [Map<K, Array<Token> | Token>, number] {
+        const res: Map<K, Array<Token> | Token> = new Map;
         let size = 0;
         for (const [v, ts] of m) {
-            const s = widenTokenSet(ts);
-            res.set(v, Array.from(s));
-            size += s.size;
+            if (ts instanceof Token) {
+                const s = widenToken(ts);
+                res.set(v, s);
+                size += 1;
+            } else {
+                const s = widenTokenSet(ts);
+                res.set(v, Array.from(s));
+                size += s.size;
+            }
         }
         return [res, size];
     }
@@ -160,6 +166,11 @@ export function widenObjects(widened: Set<ObjectToken>, solver: Solver) {
     for (const e of f.maybeEmptyMethodCalls.values()) {
         e.baseVar = widenVar(e.baseVar);
         e.calleeVar = widenVar(e.calleeVar);
+        for (let i = 0; i < e.argVars.length; i++) {
+            const a = e.argVars[i];
+            if (a)
+                e.argVars[i] = widenVar(a);
+        }
     }
     for (const e of f.unhandledDynamicPropertyWrites.values())
         e.src = widenVar(e.src);
@@ -184,5 +195,5 @@ export function widenObjects(widened: Set<ObjectToken>, solver: Solver) {
     const ms = timer.elapsed();
     solver.diagnostics.totalWideningTime += ms;
     if (logger.isVerboseEnabled())
-        logger.verbose(`Widening completed in ${ms}ms`);
+        logger.verbose(`Widening completed in ${nanoToMs(ms)}`);
 }

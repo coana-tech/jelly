@@ -1,3 +1,5 @@
+import {ApproxDiagnostics, PatchingDiagnostics} from "../approx/diagnostics";
+
 export default class AnalysisDiagnostics {
 
     packages: number = 0;
@@ -18,7 +20,7 @@ export default class AnalysisDiagnostics {
 
     callToFunctionEdges: number = 0;
 
-    iterations: number = 0;
+    propagations: number = 0;
 
     uniqueTokens: number = 0;
 
@@ -26,11 +28,13 @@ export default class AnalysisDiagnostics {
 
     timeout: boolean = false;
 
-    time: number = 0; // set when analysis is completed
-
-    cpuTime: number = 0; // set when analysis is completed
+    time: bigint = 0n; // set when analysis is completed
 
     codeSize: number = 0;
+
+    codeSizeMain: number = 0;
+
+    codeSizeDependencies: number = 0;
 
     maxMemoryUsage: number = 0;
 
@@ -58,7 +62,7 @@ export default class AnalysisDiagnostics {
 
     unprocessedTokensSize: number = 0;
 
-    fixpointRound: number = 0;
+    wave: number = 0;
 
     listenerNotificationRounds: number = 0;
 
@@ -71,24 +75,34 @@ export default class AnalysisDiagnostics {
     arrayEntriesListenerNotifications: number = 0;
 
     objectPropertiesListenerNotifications: number = 0;
-    
-    roundLimitReached: number = 0;
-    
-    totalCycleEliminationTime: number = 0;
-    
+
+    waveLimitReached: number = 0;
+
+    totalCycleEliminationTime: bigint = 0n;
+
     totalCycleEliminationRuns: number = 0;
-    
-    totalPropagationTime: number = 0;
-    
-    totalListenerCallTime: number = 0;
-    
-    totalWideningTime: number = 0;
 
-    totalFragmentMergeTime: number = 0;
+    totalPropagationTime: bigint = 0n;
 
-    finalizationTime: number = 0;
+    totalListenerCallTime: bigint = 0n;
+
+    totalWideningTime: bigint = 0n;
+
+    totalFragmentMergeTime: bigint = 0n;
+
+    totalEscapePatchingTime: bigint = 0n;
+
+    totalApproxPatchingTime: bigint = 0n;
+
+    totalOtherPatchingTime: bigint = 0n;
+
+    finalizationTime: bigint = 0n;
 
     unhandledDynamicPropertyWrites: number = 0;
 
     unhandledDynamicPropertyReads: number = 0;
+
+    approx?: ApproxDiagnostics; // set when analysis is completed if --approx enabled
+
+    patching?: PatchingDiagnostics; // set if --approx or --approx-load enabled
 }

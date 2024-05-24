@@ -22,6 +22,9 @@ import {dirname, relative, resolve} from "path";
 import {options} from "../options";
 import logger from "../misc/logger";
 import {TSModuleResolver} from "../typescript/moduleresolver";
+import {ProcessManager} from "../approx/processmanager";
+import {Patching} from "../approx/patching";
+import {isDummyConstructor} from "../parsing/extras";
 
 /**
  * Global analysis state.
@@ -158,6 +161,10 @@ export class GlobalState {
      */
     globalSpecialNatives: SpecialNativeObjects | undefined;
 
+    approx: ProcessManager | undefined;
+
+    patching: Patching | undefined;
+
     /**
      * Returns the canonical representative of the given constraint variable (possibly the given one).
      */
@@ -230,7 +237,7 @@ export class GlobalState {
      */
     registerFunctionInfo(file: FilePath, path: NodePath<Function | Class>, name: string | undefined, fun: Function) {
         const m = this.moduleInfosByPath.get(file)!;
-        const f = new FunctionInfo(name, fun, m);
+        const f = new FunctionInfo(name, fun.loc!, m, isDummyConstructor(fun));
         this.functionInfos.set(fun, f);
         const parent = path.getFunctionParent()?.node;
         (parent ? this.functionInfos.get(parent)!.functions : m.functions).add(f);
@@ -259,7 +266,7 @@ export class GlobalState {
                 // package has not been reached before (also not in another directory)
                 packageInfo = new PackageInfo(p.name, p.version, p.main, p.dir, from === undefined);
                 this.packageInfos.set(p.packagekey, packageInfo);
-                if (!options.modulesOnly && options.printProgress && logger.isVerboseEnabled())
+                if (!options.modulesOnly && !options.approxOnly && options.printProgress && logger.isVerboseEnabled())
                     logger.verbose(`Reached package ${packageInfo} at ${p.dir}`);
                 if (this.vulnerabilities)
                     this.vulnerabilities.reachedPackage(packageInfo);
@@ -280,7 +287,7 @@ export class GlobalState {
 
                 // module has not been reached before, create new ModuleInfo
                 const ignoreModule = (from && (options.ignoreDependencies ||
-                    (!packageInfo.isEntry && ((options.includePackages && !options.includePackages.includes(packageInfo.name)))))) ||
+                        (!packageInfo.isEntry && ((options.includePackages && !options.includePackages.includes(packageInfo.name)))))) ||
                     options.excludePackages?.includes(packageInfo.name);
                 moduleInfo = new ModuleInfo(rel, packageInfo, from === undefined, !ignoreModule);
                 packageInfo.modules.set(rel, moduleInfo);

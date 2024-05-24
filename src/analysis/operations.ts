@@ -8,6 +8,7 @@ import {
     isIdentifier,
     isLVal,
     isMemberExpression,
+    isMetaProperty,
     isObjectPattern,
     isOptionalMemberExpression,
     isParenthesizedExpression,
@@ -24,58 +25,19 @@ import {
     ParenthesizedExpression
 } from "@babel/types";
 import {NodePath} from "@babel/traverse";
-import {
-    getAdjustedCallNodePath,
-    getKey,
-    getProperty,
-    isInTryBlockOrBranch,
-    isMaybeUsedAsPromise,
-    isParentExpressionStatement
-} from "../misc/asthelpers";
-import {
-    AccessPathToken,
-    AllocationSiteToken,
-    ArrayToken,
-    ClassToken,
-    FunctionToken,
-    NativeObjectToken,
-    ObjectToken,
-    PackageObjectToken,
-    PrototypeToken,
-    Token
-} from "./tokens";
-import {
-    AccessorType,
-    ConstraintVar,
-    IntermediateVar,
-    isObjectPropertyVarObj,
-    NodeVar,
-    ObjectPropertyVarObj,
-    ReadResultVar
-} from "./constraintvars";
-import {
-    CallResultAccessPath,
-    IgnoredAccessPath,
-    ModuleAccessPath,
-    PropertyAccessPath,
-    UnknownAccessPath
-} from "./accesspaths";
+import {getAdjustedCallNodePath, getKey, getProperty, isInTryBlockOrBranch, isMaybeUsedAsPromise, isParentExpressionStatement} from "../misc/asthelpers";
+import {AccessPathToken, AllocationSiteToken, ArrayToken, ClassToken, FunctionToken, NativeObjectToken, ObjectToken, PackageObjectToken, PrototypeToken, Token} from "./tokens";
+import {AccessorType, ConstraintVar, IntermediateVar, isObjectPropertyVarObj, NodeVar, ObjectPropertyVarObj, ReadResultVar} from "./constraintvars";
+import {CallResultAccessPath, IgnoredAccessPath, ModuleAccessPath, PropertyAccessPath, UnknownAccessPath} from "./accesspaths";
 import Solver, {ListenerKey} from "./solver";
 import {GlobalState} from "./globalstate";
 import {DummyModuleInfo, FunctionInfo, ModuleInfo, normalizeModuleName, PackageInfo} from "./infos";
 import logger from "../misc/logger";
 import {requireResolve} from "../misc/files";
 import {options} from "../options";
-import {FilePath, getOrSet, isArrayIndex, Location, locationToStringWithFile} from "../misc/util";
+import {FilePath, getOrSet, isArrayIndex, Location, locationToString, locationToStringWithFile} from "../misc/util";
 import assert from "assert";
-import {
-    MAP_KEYS,
-    MAP_VALUES,
-    OBJECT_PROTOTYPE,
-    PROMISE_FULFILLED_VALUES,
-    SET_VALUES,
-    STANDARD_METHODS
-} from "../natives/ecmascript";
+import {MAP_KEYS, MAP_VALUES, OBJECT_PROTOTYPE, PROMISE_FULFILLED_VALUES, SET_VALUES, STANDARD_METHODS} from "../natives/ecmascript";
 import {CallNodePath, SpecialNativeObjects} from "../natives/nativebuilder";
 import {TokenListener} from "./listeners";
 import micromatch from "micromatch";
@@ -111,6 +73,7 @@ export class Operations {
         this.packageInfo = this.moduleInfo.packageInfo;
         this.packageObjectToken = this.a.canonicalizeToken(new PackageObjectToken(this.packageInfo));
         this.exportsObjectToken = this.a.canonicalizeToken(new NativeObjectToken("exports", this.moduleInfo));
+        this.a.patching?.registerAllocationSite(this.exportsObjectToken);
     }
 
     /**
@@ -132,6 +95,10 @@ export class Operations {
             this.solver.addAccessPath(UnknownAccessPath.instance, v);
         }
         return v;
+    }
+
+    private getRequireHints(pars: NodePath<Node>): Array<string> | undefined {
+        return this.a.patching?.getRequireHints((pars.node.loc as Location).module?.toString(), locationToString(pars.node.loc, false, true));
     }
 
     /**
@@ -189,11 +156,11 @@ export class Operations {
             const baseVar = this.expVar(p.node.object, p);
             const prop = getProperty(p.node);
 
-            this.solver.collectPropertyRead("call", undefined, baseVar, this.packageObjectToken, prop, p.node, caller);
-            f.registerMethodCall(path.node, baseVar, prop, calleeVar);
+            f.registerPropertyRead("call", undefined, baseVar, this.packageObjectToken, prop, p.node, caller);
+            f.registerMethodCall(path.node, baseVar, prop, calleeVar, argVars, caller);
 
             if (prop === undefined) {
-                this.solver.fragmentState.registerEscapingFromModule(baseVar); // unknown properties of the base object may escape
+                this.solver.fragmentState.registerEscaping(baseVar); // unknown properties of the base object may escape
                 this.solver.addAccessPath(UnknownAccessPath.instance, calleeVar);
             }
 
@@ -232,14 +199,15 @@ export class Operations {
                     this.solver.addAccessPath(new CallResultAccessPath(baseVar!), resultVar, t.ap);
             });
         }
-        const strings = args.length >= 1 && isStringLiteral(args[0]) ? [args[0].value] : []; // TODO: currently supporting only string literals at 'require' and 'import'
+        const strings = args.length >= 1 && isStringLiteral(args[0]) ? [args[0].value] : [];
 
         // 'import' expression
         if (path.get("callee").isImport() && args.length >= 1) {
             const v = this.a.canonicalizeVar(new IntermediateVar(path.node, "import"));
-            if (strings.length === 0)
-                f.warnUnsupported(p.node, "Unhandled 'import'");
-            for (const str of strings)
+            const ss = strings.length > 0 ? strings : this.getRequireHints(p) ?? [];
+            if (ss.length === 0)
+                f.warnUnsupported(path.node, `Unhandled 'import'${this.a.patching ? " (no hints found)" : ""}`);
+            for (const str of ss)
                 this.requireModule(str, v, path);
             const promise = this.newPromiseToken(path.node);
             this.solver.addTokenConstraint(promise, this.expVar(path.node, path));
@@ -281,9 +249,10 @@ export class Operations {
             if (t.name === "require") {
 
                 // require(...)
-                if (strings.length === 0)
-                    f.warnUnsupported(path.node, "Unhandled 'require'");
-                for (const str of strings)
+                const ss = strings.length > 0 ? strings : this.getRequireHints(pars) ?? [];
+                if (ss.length === 0)
+                    f.warnUnsupported(path.node, `Unhandled 'require'${this.a.patching ? " (no hints found)" : ""}`);
+                for (const str of ss)
                     this.requireModule(str, resultVar, path);
             }
 
@@ -292,7 +261,9 @@ export class Operations {
 
         } else if (t instanceof AccessPathToken) {
             f.registerCall(pars.node, caller, undefined, {external: true});
-            f.registerEscapingFromModuleArguments(args, path);
+            for (const arg of args)
+                if (isExpression(arg)) // TODO: handle non-Expression arguments?
+                    f.registerEscaping(f.varProducer.expVar(arg, path));
 
             // constraint: add CallResultAccessPath
             assert(calleeVar);
@@ -302,7 +273,7 @@ export class Operations {
                 const argVar = argVars[i];
                 if (argVar) {
                     // constraint: assign UnknownAccessPath to arguments to function arguments for external functions, also add (artificial) call edge
-                    this.solver.addForAllTokensConstraint(argVar, TokenListener.CALL_EXTERNAL, args[i], (at: Token) =>
+                    this.solver.addForAllTokensConstraint(argVar, TokenListener.CALL_EXTERNAL, pars.node, (at: Token) =>
                         this.invokeExternalCallback(at, pars.node, caller));
                     f.registerEscapingToExternal(argVar, args[i]);
                 } else if (isSpreadElement(args[i]))
@@ -361,9 +332,6 @@ export class Operations {
         const vp = f.varProducer;
         const pars = getAdjustedCallNodePath(path);
         f.registerCallEdge(pars.node, caller, this.a.functionInfos.get(t.fun)!, kind);
-        if ((t.fun.loc as Location).module !== this.moduleInfo)
-            for (const arg of args)
-                f.registerEscapingFromModule(arg);
         const hasArguments = f.functionsWithArguments.has(t.fun);
         const argumentsToken = hasArguments ? this.a.canonicalizeToken(new ArrayToken(t.fun.body)) : undefined;
         for (const [i, arg] of args.entries()) {
@@ -421,7 +389,7 @@ export class Operations {
      * @param extrakey is included as the str parameter when computing listener IDs
      */
     readProperty(base: ConstraintVar | undefined, prop: string | undefined, dst: ConstraintVar | undefined, node: Node, enclosing: FunctionInfo | ModuleInfo, extrakey = "") {
-        this.solver.collectPropertyRead("read", dst, base, this.packageObjectToken, prop, node, enclosing);
+        this.solver.fragmentState.registerPropertyRead("read", dst, base, this.packageObjectToken, prop, node, enclosing);
         const lopts = {n: node, s: extrakey};
 
         // expression E.p or E["p"] or E[i]
@@ -452,7 +420,7 @@ export class Operations {
             });
         } else {
 
-            this.solver.fragmentState.registerEscapingFromModule(base); // unknown properties of the base object may escape
+            this.solver.fragmentState.registerEscaping(base); // unknown properties of the base object may escape
             this.solver.addAccessPath(UnknownAccessPath.instance, dst);
 
             // constraint: ∀ arrays t ∈ ⟦E⟧: ...
@@ -466,7 +434,7 @@ export class Operations {
                         // TODO: ignoring reads from prototype chain
 
                     } else if (!(t instanceof AccessPathToken)) { // TODO: assuming dynamic reads from arrays only read array indices
-                        if (logger.isInfoEnabled())
+                        if (logger.isInfoEnabled() || options.approx || options.approxLoad)
                             this.solver.fragmentState.registerUnhandledDynamicPropertyRead(node);
                     }
                 });
@@ -486,11 +454,12 @@ export class Operations {
         if (base instanceof ArrayToken && prop === "length")
             return undefined;
         const dst = this.solver.varProducer.readResultVar(base, prop);
+        const basePropSpecial =
+            (base instanceof FunctionToken && STANDARD_METHODS.get("Function")!.has(prop)) ||
+            (base instanceof AllocationSiteToken && base.kind !== "Object" && STANDARD_METHODS.get(base.kind)?.has(prop));
         // constraint: ... ∀ ancestors t2 of t: ...
         this.solver.addForAllAncestorsConstraint(base, TokenListener.READ_ANCESTORS, {s: prop}, (t2: Token) => {
-            if (((base instanceof FunctionToken && STANDARD_METHODS.get("Function")!.has(prop)) ||
-                (base instanceof AllocationSiteToken && base.kind !== "Object" && STANDARD_METHODS.get(base.kind)?.has(prop))) &&
-                t2 === this.globalSpecialNatives.get(OBJECT_PROTOTYPE))
+            if (basePropSpecial && t2 === this.globalSpecialNatives.get(OBJECT_PROTOTYPE))
                 return; // safe to skip properties at Object.prototype that are in {base.kind}.prototype
             if (isObjectPropertyVarObj(t2))
                 this.readPropertyBound(t2, prop, dst, {t: base, s: prop}, base);
@@ -592,6 +561,11 @@ export class Operations {
 
         if (isObjectPropertyVarObj(base)) {
 
+            if (!options.nativeOverwrites && base instanceof NativeObjectToken && this.a.globalSpecialNatives?.has(base.name) && this.a.globalSpecialNatives?.has(`${base.name}.${prop}`)) {
+                this.solver.fragmentState.warnUnsupported(node, `Ignoring write to native property ${base.name}.${prop}`);
+                return;
+            }
+
             // constraint: ...: ⟦E2⟧ ⊆ ⟦base.p⟧
             if (src)
                 this.solver.addSubsetConstraint(src, this.solver.varProducer.objPropVar(base, prop, ac));
@@ -664,7 +638,7 @@ export class Operations {
             try {
 
                 // try to locate the module
-                const filepath = requireResolve(str, this.file, path.node, f);
+                const filepath = requireResolve(str, this.file, f.a, path.node, f);
                 if (filepath) {
 
                     // register that the module is reached
@@ -687,6 +661,8 @@ export class Operations {
                         logger.verbose(`Ignoring unresolved module '${str}' at ${locationToStringWithFile(path.node.loc)}`);
                 } else if (isInTryBlockOrBranch(path))
                     f.warn(`Unable to resolve conditionally loaded module '${str}'`, path.node);
+                else if (!(path.isCallExpression() && isIdentifier(path.node.callee) && path.node.callee.name === "require"))
+                    f.warn(`Unable to resolve module '${str}' at indirect require call`, path.node);
                 else
                     f.error(`Unable to resolve module '${str}'`, path.node);
 
@@ -757,8 +733,8 @@ export class Operations {
             } else {
 
                 // E1[...] = E2
-                this.solver.collectDynamicPropertyWrite(lVar);
-                this.solver.fragmentState.registerEscapingFromModule(src);
+                this.solver.fragmentState.registerDynamicPropertyWrite(lVar);
+                this.solver.fragmentState.registerEscaping(src);
 
                 // constraint: ∀ arrays t ∈ ⟦E1⟧: ...
                 if (src)
@@ -843,6 +819,8 @@ export class Operations {
                     }
         } else if (isTSParameterProperty(dst))
             this.assign(src, dst.parameter, path);
+        else if (isMetaProperty(dst))
+            this.solver.fragmentState.warnUnsupported(dst, "MetaProperty"); // TODO: MetaProperty, e.g. new.target
         else {
             if (!isRestElement(dst))
                 assert.fail(`Unexpected LVal type ${dst.type} at ${locationToStringWithFile(dst.loc)}`);
@@ -889,8 +867,10 @@ export class Operations {
     newObjectToken(n: Node): ObjectToken | PackageObjectToken {
         if (options.alloc) {
             const t = this.a.canonicalizeToken(new ObjectToken(n));
-            if (!options.widening || !this.solver.fragmentState.widened.has(t))
+            if (!options.widening || !this.solver.fragmentState.widened.has(t)) {
+                this.a.patching?.registerAllocationSite(t);
                 return t;
+            }
         }
         return this.packageObjectToken;
     }
@@ -899,14 +879,18 @@ export class Operations {
      * Creates a new PrototypeToken.
      */
     newPrototypeToken(fun: Function): PrototypeToken {
-        return this.a.canonicalizeToken(new PrototypeToken(fun));
+        const t = this.a.canonicalizeToken(new PrototypeToken(fun));
+        this.a.patching?.registerAllocationSite(t);
+        return t;
     }
 
     /**
      * Creates a new ArrayToken.
      */
     newArrayToken(n: Node): ArrayToken {
-        return this.a.canonicalizeToken(new ArrayToken(n));
+        const t = this.a.canonicalizeToken(new ArrayToken(n));
+        this.a.patching?.registerAllocationSite(t);
+        return t;
     }
 
     /**
@@ -920,7 +904,9 @@ export class Operations {
      * Creates a new FunctionToken.
      */
     newFunctionToken(fun: Function): FunctionToken {
-        return this.a.canonicalizeToken(new FunctionToken(fun));
+        const t = this.a.canonicalizeToken(new FunctionToken(fun));
+        this.a.patching?.registerAllocationSite(t);
+        return t;
     }
 
     /**

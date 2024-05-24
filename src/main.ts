@@ -30,6 +30,7 @@ import {addAll} from "./misc/util";
 import {getAPIExported, reportAccessPaths, reportAPIExportedFunctions} from "./patternmatching/apiexported";
 import {merge} from "./output/merge";
 import {CallGraph} from "./typings/callgraph";
+import {ProcessManager} from "./approx/processmanager";
 
 program
     .name("jelly")
@@ -45,6 +46,10 @@ program
     .option("-s, --soundness <file>", "compare with dynamic call graph")
     .option("-n, --graal-home <directory>", "home of graal-nodejs (default: $GRAAL_HOME)")
     .option("-d, --dynamic <file>", "generate call graph dynamically, no static analysis")
+    .option("--approx", "enable approximate interpretation")
+    .option("--approx-only <file>", "perform approximate interpretation, no static analysis")
+    .option("--approx-load <file>", "use pre-computed approximate interpretation results")
+    .option("--approx-store <file>", "store approximate interpretation results (use with --approx)")
     .option("-p, --patterns <file...>", "files containing API usage patterns to detect")
     .option("-v, --vulnerabilities <file>", "report vulnerability matches")
     // .option("-g, --callgraph-graphviz <file>", "save call graph as Graphviz dot file") // TODO: graphviz output disabled for now
@@ -83,20 +88,22 @@ program
     .option("--diagnostics", "report internal analysis diagnostics")
     .option("--diagnostics-json <file>", "save analysis diagnostics in JSON file")
     .option("--variable-kinds", "report constraint variable kinds")
-    .option("--max-rounds <number>", "limit number of fixpoint rounds for each module and package")
+    .option("--max-waves <number>", "limit number of fixpoint waves")
     .option("--typescript-library-usage <file>", "save TypeScript library usage in JSON file, no analysis")
     .option("--modules-only", "report reachable packages and modules only, no analysis")
     .option("--compare-callgraphs", "compare two call graphs given as JSON files, no analysis")
     .option("--reachability", "compare call graph reachability (use with -s or --compare-callgraphs)")
-    .option("--assume-in-node-modules", "treat analyzed files as in node_modules")
+    .option("--library", "assume program is a library (default: true if in node_modules)")
     .option("--no-alloc", "disable allocation site abstraction")
     .option("--oldobj", "old object abstraction")
     .option("--widening", "enable object widening")
+    .option("--no-patch-escaping", "disable patching using escape analysis")
     .option("--patch-dynamics", "enable dynamic property access patching heuristic")
     .option("--patch-method-calls", "enable method call patching heuristic")
     .option("--read-neighbors", "enable package neighbor heuristic")
     .option("--proto", "enable model of assignments to the __proto__ property")
     .option("--obj-spread", "enable model of spread syntax for object literals ({...obj})")
+    .option("--native-overwrites", "allow overwriting of native object properties")
     .usage("[options] [files]")
     .addHelpText("after",
         "\nAll modules reachable by require/import from the given files are included in the analysis\n" +
@@ -231,10 +238,10 @@ async function main() {
             return;
         }
 
-        if (!autoDetectBaseDir(program.args))
-            return;
         let files;
         try {
+            if (!autoDetectBaseDir(program.args))
+                return;
             files = expand(program.args);
         } catch (e) {
             logger.info(`Error: ${e instanceof Error ? "code" in e && e.code === "ENOENT" && "path" in e ? `File not found ${e.path}` : e.message : "Unable to expand paths"}`);
@@ -246,7 +253,21 @@ async function main() {
                 logger.verbose(`  ${file}`);
         }
 
-        if (options.typescriptLibraryUsage) {
+        if (options.approxOnly) {
+
+            const p = new ProcessManager();
+            try {
+                await p.analyzeFiles(files);
+            } finally {
+                p.saveHintsToFile(options.approxOnly);
+                if (options.diagnostics)
+                    p.printDiagnostics();
+                if (options.diagnosticsJson)
+                    p.saveDiagnosticsToFile(options.diagnosticsJson);
+                p.stop();
+            }
+
+        } else if (options.typescriptLibraryUsage) {
 
             const ts = new TypeScriptTypeInferrer(files);
             const fd = openSync(options.typescriptLibraryUsage, "w");

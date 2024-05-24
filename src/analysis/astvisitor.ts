@@ -193,7 +193,10 @@ export function visit(ast: File, op: Operations) {
                 isObjectMethod(p.node) || isClassMethod(p.node) || isClassPrivateMethod(p.node) ||
                 isStaticBlock(p.node) || isClassProperty(p.node) || isClassPrivateProperty(p.node)) as
                 NodePath<ObjectMethod | ClassMethod | ClassPrivateMethod | StaticBlock | ClassProperty | ClassPrivateProperty> | null;
-            assert(encl);
+            if (!encl) {
+                f.error("'super' keyword unexpected", path.node);
+                return;
+            }
             let src;
             if (isObjectMethod(encl.node)) { // in object expression
                 // super ~ this.[[Prototype]]
@@ -535,7 +538,7 @@ export function visit(ast: File, op: Operations) {
                             solver.addSubsetConstraint(rightvar, dst);
                         }
                     }
-                } else
+                } else // TODO: only warn if not patched?
                     f.warnUnsupported(path.node, "Dynamic property name"); // TODO: nontrivial computed property name
                 registerArtificialClassPropertyInitializer(f, path);
             },
@@ -611,8 +614,14 @@ export function visit(ast: File, op: Operations) {
                                 }
                                 solver.addTokenConstraint(t, dst);
                             }
-                        } else
+                        } else {
+
+                            if (!options.oldobj && (options.approx || options.approxLoad))
+                                op.newFunctionToken(path.node); // need to register the allocation site for patching
+
+                            // TODO: only warn if not patched?
                             f.warnUnsupported(path.node, "Dynamic method name"); // TODO: nontrivial computed method name
+                        }
                         break;
                     case "constructor":
 
@@ -732,7 +741,7 @@ export function visit(ast: File, op: Operations) {
                             solver.addForAllTokensConstraint(argVar, TokenListener.OBJECT_SPREAD, p, (t: Token) => {
                                 if (isObjectPropertyVarObj(t)) {
                                     solver.addForAllObjectPropertiesConstraint(t, TokenListener.OBJECT_SPREAD, path.node, (prop: string) => {
-                                        solver.collectPropertyRead("read", undefined, argVar, undefined, prop, path.node, enclosing);
+                                        solver.fragmentState.registerPropertyRead("read", undefined, argVar, undefined, prop, path.node, enclosing);
                                         op.readPropertyBound(t, prop, vp.objPropVar(ot, prop), {t: ot, s: prop});
                                     });
                                 }
@@ -773,7 +782,7 @@ export function visit(ast: File, op: Operations) {
 
         ThrowStatement: {
             exit(path: NodePath<ThrowStatement>) {
-                f.registerEscapingFromModule(op.expVar(path.node.argument, path));
+                f.registerEscaping(op.expVar(path.node.argument, path));
             }
         },
 
@@ -974,11 +983,14 @@ export function visit(ast: File, op: Operations) {
      * Visits a MemberExpression or OptionalMemberExpression.
      */
     function visitMemberExpression(path: NodePath<MemberExpression | OptionalMemberExpression | JSXMemberExpression>) {
+        const dstVar = isParentExpressionStatement(path) ? undefined : vp.nodeVar(path.node);
+        // Record dynamic read for approximate interpretation
+        a.patching?.recordDynamicRead(path.node, dstVar);
         if (isAssignmentExpression(path.parent) && path.parent.left === path.node)
             return; // don't treat left-hand-sides of assignments as expressions
         if (isCalleeExpression(path))
             return; // don't perform a property read for method calls
 
-        op.readProperty(op.expVar(path.node.object, path), getProperty(path.node), isParentExpressionStatement(path) ? undefined : vp.nodeVar(path.node), path.node, a.getEnclosingFunctionOrModule(path, op.moduleInfo));
+        op.readProperty(op.expVar(path.node.object, path), getProperty(path.node), dstVar, path.node, a.getEnclosingFunctionOrModule(path, op.moduleInfo));
     }
 }

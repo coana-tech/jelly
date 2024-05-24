@@ -1,24 +1,5 @@
-import {
-    CallExpression,
-    Expression,
-    isExpression,
-    isIdentifier,
-    isObjectExpression,
-    isObjectProperty
-} from "@babel/types";
-import {
-    AccessPathToken,
-    AllocationSiteToken,
-    ArrayToken,
-    ClassToken,
-    FunctionToken,
-    NativeObjectToken,
-    ObjectKind,
-    ObjectToken,
-    PackageObjectToken,
-    PrototypeToken,
-    Token
-} from "../analysis/tokens";
+import {CallExpression, Expression, isExpression, isIdentifier, isObjectExpression, isObjectProperty} from "@babel/types";
+import {AccessPathToken, AllocationSiteToken, ArrayToken, ClassToken, FunctionToken, NativeObjectToken, ObjectKind, ObjectToken, PackageObjectToken, PrototypeToken, Token} from "../analysis/tokens";
 import {getKey, isParentExpressionStatement} from "../misc/asthelpers";
 import {Node} from "@babel/core";
 import {
@@ -47,14 +28,7 @@ import {TokenListener} from "../analysis/listeners";
 import assert from "assert";
 import {NodePath} from "@babel/traverse";
 import {Operations} from "../analysis/operations";
-import {
-    AccessorType,
-    ConstraintVar,
-    IntermediateVar,
-    isObjectPropertyVarObj,
-    ObjectPropertyVarObj
-} from "../analysis/constraintvars";
-import {Location} from "../misc/util";
+import {AccessorType, ConstraintVar, IntermediateVar, isObjectPropertyVarObj, ObjectPropertyVarObj} from "../analysis/constraintvars";
 import {UnknownAccessPath} from "../analysis/accesspaths";
 
 /**
@@ -183,7 +157,7 @@ export function returnPackageObject(p: NativeFunctionParams, kind: ObjectKind = 
  */
 export function widenArgument(arg: Node, p: NativeFunctionParams) {
     if (isExpression(arg)) // TODO: non-Expression arguments?
-        p.solver.fragmentState.registerEscapingFromModule(p.solver.varProducer.expVar(arg, p.path)); // triggers widening to field-based
+        p.solver.fragmentState.registerEscaping(p.solver.varProducer.expVar(arg, p.path)); // triggers widening to field-based
 }
 
 /**
@@ -198,14 +172,18 @@ export function returnArgument(arg: Node, p: NativeFunctionParams) {
  * Creates a new object represented by an ObjectToken or PackageObjectToken.
  */
 export function newObject(p: NativeFunctionParams): ObjectToken | PackageObjectToken {
-    return  p.op.newObjectToken(p.path.node);
+    const t = p.op.newObjectToken(p.path.node);
+    p.solver.globalState.patching?.registerAllocationSite(t);
+    return t;
 }
 
 /**
  * Creates a new AllocationSiteToken with the given kind (not Object, Array or Prototype).
  */
 export function newSpecialObject(kind: ObjectKind, p: NativeFunctionParams): AllocationSiteToken {
-    return p.solver.globalState.canonicalizeToken(new AllocationSiteToken(kind, p.path.node));
+    const t = p.solver.globalState.canonicalizeToken(new AllocationSiteToken(kind, p.path.node));
+    p.solver.globalState.patching?.registerAllocationSite(t);
+    return t;
 }
 
 /**
@@ -219,7 +197,9 @@ export function newPackageObject(kind: ObjectKind, p: NativeFunctionParams): Pac
  * Creates a new array represented by an ArrayToken.
  */
 export function newArray(p: NativeFunctionParams): ArrayToken {
-    return p.op.newArrayToken(p.path.node);
+    const t = p.op.newArrayToken(p.path.node);
+    p.solver.globalState.patching?.registerAllocationSite(t);
+    return t;
 }
 
 /**
@@ -582,7 +562,6 @@ export function invokeCallApplyBound(kind: CallApplyKind, p: NativeFunctionParam
             break;
         case "Function.prototype.apply": {
             if (args.length >= 2 && isExpression(args[1])) { // TODO: SpreadElement
-                const escapes = (ft.fun.loc as Location).module !== p.moduleInfo;
                 const argVar = vp.expVar(args[1], p.path);
                 // model dynamic parameter passing like 'callFunctionTokenBound'
                 p.solver.addForAllTokensConstraint(argVar, TokenListener.NATIVE_INVOKE_CALL_APPLY2, ft.fun, (t: Token) => {
@@ -594,17 +573,7 @@ export function invokeCallApplyBound(kind: CallApplyKind, p: NativeFunctionParam
                                 const paramVar = p.solver.varProducer.nodeVar(ft.fun.params[param]);
                                 p.solver.addSubsetConstraint(opv, paramVar);
                             }
-                            if (escapes) {
-                                const opv = p.solver.varProducer.objPropVar(t, prop);
-                                p.solver.fragmentState.registerEscapingFromModule(opv);
-                            }
                         });
-
-                        if (escapes) {
-                            const unk = p.solver.varProducer.arrayUnknownVar(t);
-                            p.solver.fragmentState.registerEscapingFromModule(unk);
-                        }
-
                         for (const param of ft.fun.params)
                             if (isIdentifier(param)) { // TODO: non-Identifier parameters?
                                 const unk = p.solver.varProducer.arrayUnknownVar(t);
@@ -968,7 +937,7 @@ export function assignProperties(target: Expression, sources: Array<Node>, p: Na
     p.solver.addForAllTokensConstraint(sVar, TokenListener.NATIVE_ASSIGN_PROPERTIES, node, (s: Token) => {
         if (isObjectPropertyVarObj(s))
             p.solver.addForAllObjectPropertiesConstraint(s, TokenListener.NATIVE_ASSIGN_PROPERTIES2, node, (prop: string) => {
-                p.solver.collectPropertyRead("read", undefined, sVar, undefined, prop, node, enclosing);
+                p.solver.fragmentState.registerPropertyRead("read", undefined, sVar, undefined, prop, node, enclosing);
                 const iVar = p.solver.varProducer.intermediateVar(node, `Object.assign:${prop}`);
                 p.op.readPropertyBound(s, prop, iVar, {n: node, s: prop});
                 p.solver.addForAllTokensConstraint(tVar, TokenListener.NATIVE_ASSIGN_PROPERTIES3, {n: node, s: prop}, (t: Token) => {

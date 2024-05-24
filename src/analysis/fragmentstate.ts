@@ -1,27 +1,10 @@
 import {ConstraintVar, ObjectPropertyVarObj} from "./constraintvars";
 import {AccessPathToken, ArrayToken, FunctionToken, ObjectToken, PackageObjectToken, Token} from "./tokens";
 import {DummyModuleInfo, FunctionInfo, ModuleInfo, PackageInfo} from "./infos";
-import {
-    CallExpression,
-    Function,
-    Identifier,
-    isArrowFunctionExpression,
-    isExpression,
-    JSXIdentifier,
-    NewExpression,
-    Node,
-    OptionalCallExpression,
-    SourceLocation,
-} from "@babel/types";
+import {CallExpression, Function, Identifier, isArrowFunctionExpression, JSXIdentifier, NewExpression, Node, OptionalCallExpression, SourceLocation,} from "@babel/types";
 import assert from "assert";
 import {addMapHybridSet, locationToStringWithFile, locationToStringWithFileAndEnd, mapGetSet} from "../misc/util";
-import {
-    AccessPath,
-    CallResultAccessPath,
-    ComponentAccessPath,
-    ModuleAccessPath,
-    PropertyAccessPath
-} from "./accesspaths";
+import {AccessPath, CallResultAccessPath, ComponentAccessPath, ModuleAccessPath, PropertyAccessPath} from "./accesspaths";
 import {options} from "../options";
 import logger from "../misc/logger";
 import {NodePath} from "@babel/traverse";
@@ -226,10 +209,9 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     readonly invokedExpressions: Set<Node> = new Set;
 
     /**
-     * Token values and constraint variables that represent expressions whose values may escape to other modules.
-     * Includes arguments to functions from other modules.
+     * Token values and constraint variables that represent expressions whose values may escape.
      */
-    readonly maybeEscapingFromModule: Set<Token | ConstraintVar> = new Set;
+    readonly maybeEscaping: Set<Token | ConstraintVar> = new Set;
 
     /**
      * Object tokens that have been widened.
@@ -332,7 +314,13 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
      * Method calls that may have empty base.
      * Used by patchMethodCalls.
      */
-    readonly maybeEmptyMethodCalls: Map<Node, {baseVar: ConstraintVar, prop: string, calleeVar: ConstraintVar}> = new Map;
+    readonly maybeEmptyMethodCalls: Map<Node, {
+        baseVar: ConstraintVar,
+        prop: string,
+        calleeVar: ConstraintVar,
+        argVars: Array<ConstraintVar | undefined>,
+        caller: ModuleInfo | FunctionInfo
+    }> = new Map;
 
     constructor(s: Solver) {
         this.a = s.globalState;
@@ -396,9 +384,16 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     /**
      * Registers a method call.
      */
-    registerMethodCall(node: Node, baseVar: ConstraintVar | undefined, prop: string | undefined, calleeVar: ConstraintVar | undefined) {
+    registerMethodCall(
+        node: Node,
+        baseVar: ConstraintVar | undefined,
+        prop: string | undefined,
+        calleeVar: ConstraintVar | undefined,
+        argVars: Array<ConstraintVar | undefined>,
+        caller: ModuleInfo | FunctionInfo
+    ) {
         if (baseVar && prop !== undefined && calleeVar && options.patchMethodCalls)
-            this.maybeEmptyMethodCalls.set(node, {baseVar, prop, calleeVar});
+            this.maybeEmptyMethodCalls.set(node, {baseVar, prop, calleeVar, argVars, caller});
     }
 
     /**
@@ -440,20 +435,11 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     }
 
     /**
-     * Registers that the token or values of the expression represented by the given constraint variable may escape to other modules.
+     * Registers that the token or values of the expression represented by the given constraint variable may escape.
      */
-    registerEscapingFromModule(v: Token | ConstraintVar | undefined) {
+    registerEscaping(v: Token | ConstraintVar | undefined) {
         if (v)
-            this.maybeEscapingFromModule.add(v);
-    }
-
-    /**
-     * Registers a call to another module.
-     */
-    registerEscapingFromModuleArguments(args: CallExpression["arguments"], path: NodePath<CallExpression | OptionalCallExpression | NewExpression>) {
-        for (const arg of args)
-            if (isExpression(arg)) // TODO: handle non-Expression arguments?
-                this.registerEscapingFromModule(this.varProducer.expVar(arg, path));
+            this.maybeEscaping.add(v);
     }
 
     /**
@@ -495,6 +481,39 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
      */
     registerUnhandledDynamicPropertyRead(node: Node) {
         this.unhandledDynamicPropertyReads.add(node);
+    }
+
+    /**
+     * Registers a property read operation.
+     * @param typ the type of the property read operation
+     * @param result the constraint variable for the result of the property read operation
+     * @param base the constraint variable for the base expression
+     * @param pck the current package object token
+     * @param prop the property name
+     * @param node AST node
+     * @param enclosing enclosing function or module
+     */
+    registerPropertyRead(
+        typ: "read" | "call", result: ConstraintVar | undefined, base: ConstraintVar | undefined,
+        pck: PackageObjectToken | undefined, prop: string | undefined, node: Node, enclosing: FunctionInfo | ModuleInfo
+    ) {
+        if (typ === "read" && result && base && pck)
+            this.maybeEmptyPropertyReads.push({typ, result, base, pck, prop});
+        else if (typ === "call" && base && prop)
+            // call with @Unknown already happens when prop is undefined, so we only need to register
+            // the property read for patching if the property is known
+            this.maybeEmptyPropertyReads.push({typ, base, prop});
+        if (base && prop)
+            this.propertyReads.push({base, prop, node, enclosing});
+    }
+
+    /**
+     * Registers a dynamic property write operation.
+     * @param base the constraint variable for the base expression
+     */
+    registerDynamicPropertyWrite(base: ConstraintVar | undefined) {
+        if (base)
+            this.dynamicPropertyWrites.add(base);
     }
 
     private makeMsg(msg: string, node?: Node): string {
@@ -675,6 +694,23 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
         return FragmentState.emptySizeAndHas;
     }
 
+    private static emptyHas = (_t: Token) => false;
+
+    /**
+     * Returns a 'has' function for the given constraint variable.
+     */
+    getHas(v: RVT): (t: Token) => boolean {
+        if (v) {
+            const ts = this.tokens.get(v);
+            if (ts) {
+                if (ts instanceof Token)
+                    return (t: Token) => ts === t;
+                return (t: Token) => ts.has(t);
+            }
+        }
+        return FragmentState.emptyHas;
+    }
+
     /**
      * Returns the number of constraint variables with tokens.
      */
@@ -719,6 +755,19 @@ export class FragmentState<RVT extends RepresentativeVar | MergeRepresentativeVa
     replaceTokens(v: RVT, ts: Set<Token>, old: number) {
         this.tokens.set(v, ts.size === 1 ? ts.values().next().value : ts);
         this.numberOfTokens += ts.size - old;
+    }
+
+    /**
+     * Checks whether a constraint variable has a token.
+     */
+    hasToken(v: RVT, t: Token): boolean {
+        const ts = this.tokens.get(v);
+        if (!ts)
+            return false;
+        else if (ts instanceof Token)
+            return ts === t;
+        else
+            return ts.has(t);
     }
 
     /**

@@ -1,5 +1,5 @@
 import {ConstraintVar, IntermediateVar, isObjectPropertyVarObj, NodeVar, ObjectPropertyVarObj} from "./constraintvars";
-import logger, {isTTY, writeStdOut} from "../misc/logger";
+import logger, {GREY, isTTY, RESET, writeStdOut} from "../misc/logger";
 import {
     AccessPathToken,
     AllocationSiteToken,
@@ -12,7 +12,7 @@ import {
     Token
 } from "./tokens";
 import {GlobalState} from "./globalstate";
-import {FunctionInfo, ModuleInfo, PackageInfo} from "./infos";
+import {PackageInfo} from "./infos";
 import {
     addAll,
     addAllMapHybridSet,
@@ -20,7 +20,6 @@ import {
     Location,
     locationToStringWithFileAndEnd,
     mapArrayPushAll,
-    mapGetArray,
     mapGetMap,
     mapGetSet,
     mapMapMapSetAll,
@@ -29,6 +28,7 @@ import {
     mapSetAddAll,
     nodeToString,
     pushAll,
+    pushArraySingle,
     setAll,
     strHash,
 } from "../misc/util";
@@ -47,7 +47,7 @@ import {FragmentState, ListenerID, MergeRepresentativeVar, RepresentativeVar} fr
 import {TokenListener} from "./listeners";
 import {nuutila} from "../misc/scc";
 import {options, patternProperties} from "../options";
-import Timer from "../misc/timer";
+import Timer, {nanoToMs} from "../misc/timer";
 import {setImmediate} from "timers/promises";
 import {getMemoryUsage} from "../misc/memory";
 import {JELLY_NODE_ID} from "../parsing/extras";
@@ -75,6 +75,8 @@ export class AbortedException extends Error {}
 
 export type ListenerKey = {l: TokenListener, n?: Node, t?: Token, s?: string};
 
+export type Phase = "init" | "module" | "main" | "merging" | "widening" | "escape patching" | "approximate patching" | "extra patching" | "test";
+
 export default class Solver {
 
     readonly globalState: GlobalState = new GlobalState;
@@ -85,7 +87,7 @@ export default class Solver {
         return this.fragmentState.varProducer;
     }
 
-    unprocessedTokens: Map<RepresentativeVar, Array<Token>> = new Map;
+    unprocessedTokens: Map<RepresentativeVar, Array<Token> | Token> = new Map;
 
     nodesWithNewEdges: Set<ConstraintVar> = new Set;
 
@@ -97,7 +99,11 @@ export default class Solver {
 
     readonly abort?: () => boolean;
 
-    fixpointIterationsThrottled: number = 0;
+    propagationsThrottled: number = 0;
+
+    phase: Phase | undefined;
+
+    timer = new Timer();
 
     constructor(abort?: () => boolean) {
         this.abort = abort;
@@ -161,15 +167,19 @@ export default class Solver {
 
     /**
      * Adds a set of tokens if not already present.
-     * By default also adds to worklist and notifies listeners.
+     * Also adds to worklist and notifies listeners.
      */
-    private addTokens(ts: Iterable<Token>, toRep: RepresentativeVar, propagate: boolean = true) {
+    private addTokens(ts: Iterable<Token> | Token, toRep: RepresentativeVar) {
         const f = this.fragmentState;
         f.vars.add(toRep);
-        let ws: Array<Token> | undefined = undefined;
-        for (const t of f.addTokens(ts, toRep)) {
-            if (propagate)
-                ws = this.tokenAdded(toRep, t, ws);
+        if (ts instanceof Token) {
+            if (f.addToken(ts, toRep))
+                this.tokenAdded(toRep, ts);
+        } else {
+            let ws: Array<Token> | Token | undefined = undefined;
+            let tr: Map<ListenerID, (t: Token) => void> | undefined = undefined;
+            for (const t of f.addTokens(ts, toRep))
+                [ws, tr] = this.tokenAdded(toRep, t, ws, tr);
         }
     }
 
@@ -182,12 +192,13 @@ export default class Solver {
         for (const [v, ts, size] of f.getAllVarsAndTokens()) {
             const r = new Set<Token>();
             let any = false;
-            let ws: Array<Token> | undefined = undefined;
+            let ws: Array<Token> | Token | undefined = undefined;
+            let tr: Map<ListenerID, (t: Token) => void> | undefined = undefined;
             for (const t of ts) {
                 const q = t instanceof ObjectToken && m.get(t);
                 if (q) {
                     if (!(Array.isArray(ts) ? ts.includes(q) : ts.has(q)) && !r.has(q))
-                        ws = this.tokenAdded(v, q, ws);
+                        [ws, tr] = this.tokenAdded(v, q, ws, tr);
                     r.add(q);
                     any = true;
                 } else
@@ -198,15 +209,25 @@ export default class Solver {
         }
     }
 
-    private tokenAdded(toRep: ConstraintVar, t: Token, ws?: Array<Token>): Array<Token> | undefined {
+    private tokenAdded(toRep: RepresentativeVar, t: Token, ws?: Array<Token> | Token, tr?: Map<ListenerID, (t: Token) => void> | undefined):
+        [Array<Token> | Token | undefined, Map<ListenerID, (t: Token) => void> | undefined] {
+        const f = this.fragmentState;
         if (logger.isDebugEnabled())
             logger.debug(`Added token ${t} to ${toRep}`);
+        if (!ws) {
+            ws = this.unprocessedTokens.get(toRep);
+            tr = f.tokenListeners.get(toRep);
+        }
         // add to worklist
-        (ws ??= mapGetArray(this.unprocessedTokens, toRep)).push(t);
+        ws = pushArraySingle(this.unprocessedTokens, toRep, t, ws);
         this.diagnostics.unprocessedTokensSize++;
         if (this.diagnostics.unprocessedTokensSize % 100 === 0)
             this.printDiagnostics();
-        return ws;
+        // notify listeners
+        if (tr)
+            for (const [id, listener] of tr)
+                this.callTokenListener(id, listener, t);
+        return [ws, tr];
     }
 
     /**
@@ -248,16 +269,17 @@ export default class Solver {
      * Reports diagnostics periodically (only if print progress is enabled, stdout is tty, and log level is "info").
      */
     private printDiagnostics() {
-        if (options.printProgress && options.tty && isTTY && !options.logfile && logger.level === "info") {
-            const d = new Date().getTime();
+        if (options.printProgress && options.tty && isTTY && !options.logfile && logger.level === "info" && this.phase) {
+            const d = Number(this.timer.elapsed() / 1000000n);
             if (d > this.diagnostics.lastPrintDiagnosticsTime + 100) { // only report every 100ms
                 this.diagnostics.lastPrintDiagnosticsTime = d;
-                const a = this.globalState;
+                // const a = this.globalState;
                 const f = this.fragmentState;
-                writeStdOut(`Packages: ${a.packageInfos.size}, modules: ${a.moduleInfos.size}, call edges: ${f.numberOfCallToFunctionEdges}, ` +
-                    (options.diagnostics ? `vars: ${f.getNumberOfVarsWithTokens()}, tokens: ${f.numberOfTokens}, subsets: ${f.numberOfSubsetEdges}, round: ${this.diagnostics.fixpointRound}, ` : "") +
-                    `iterations: ${this.diagnostics.iterations}, worklist: ${this.diagnostics.unprocessedTokensSize}` +
-                    (options.diagnostics ? `, listeners: ${f.postponedListenerCalls.length}` : ""));
+                writeStdOut(`Phase: ${this.phase}, ` +
+                    // `packages: ${a.packageInfos.size}, modules: ${a.moduleInfos.size}, ` +
+                    `total time: ${d}ms, call edges: ${f.numberOfCallToFunctionEdges}` +
+                    (options.diagnostics ? `, vars: ${f.getNumberOfVarsWithTokens()}, tokens: ${f.numberOfTokens}, subsets: ${f.numberOfSubsetEdges}, wave: ${this.diagnostics.wave}, ` +
+                    `propagations: ${this.diagnostics.propagations}, worklist: ${this.diagnostics.unprocessedTokensSize}, listeners: ${f.postponedListenerCalls.length}` : ""));
                 f.a.timeoutTimer.checkTimeout();
             }
         }
@@ -275,7 +297,7 @@ export default class Solver {
         this.addSubsetEdge(f.getRepresentative(from), f.getRepresentative(to));
     }
 
-    addSubsetEdge(fromRep: RepresentativeVar, toRep: RepresentativeVar, propagate: boolean = true) {
+    addSubsetEdge(fromRep: RepresentativeVar, toRep: RepresentativeVar) {
         if (fromRep !== toRep) {
             const f = this.fragmentState;
             const s = mapGetSet(f.subsetEdges, fromRep);
@@ -288,17 +310,15 @@ export default class Solver {
                     assert(!f.redirections.has(fromRep) && !f.redirections.has(toRep));
                 f.vars.add(fromRep);
                 f.vars.add(toRep);
-                if (propagate) {
-                    // propagate tokens
-                    const [size, ts] = this.fragmentState.getTokensSize(fromRep);
-                    if (size > 0) {
-                        if (logger.isDebugEnabled())
-                            logger.debug(`Worklist size: ${this.diagnostics.unprocessedTokensSize}, propagating ${size} token${size !== 1 ? "s" : ""} from ${fromRep}`);
-                        this.addTokens(ts, toRep);
-                        this.incrementIterations();
-                    }
-                    this.nodesWithNewEdges.add(fromRep);
+                // propagate tokens
+                const [size, ts] = this.fragmentState.getTokensSize(fromRep);
+                if (size > 0) {
+                    if (logger.isDebugEnabled())
+                        logger.debug(`Worklist size: ${this.diagnostics.unprocessedTokensSize}, propagating ${size} token${size !== 1 ? "s" : ""} from ${fromRep}`);
+                    this.addTokens(ts, toRep);
+                    this.incrementPropagations();
                 }
+                this.nodesWithNewEdges.add(fromRep);
             }
         }
     }
@@ -363,7 +383,7 @@ export default class Solver {
         this.addForAllTokensConstraintPrivate(vRep, this.getListenerID(lkey), listener);
     }
 
-    private addForAllTokensConstraintPrivate(vRep: RepresentativeVar, id: ListenerID, listener: (t: Token) => void) {
+    private addForAllTokensConstraintPrivate(vRep: RepresentativeVar, id: ListenerID, listener: (t: Token) => void): boolean {
         const f = this.fragmentState;
         const m = mapGetMap(f.tokenListeners, vRep);
         if (!m.has(id)) {
@@ -372,8 +392,10 @@ export default class Solver {
                 this.callTokenListener(id, listener, t);
             // register listener for future tokens
             m.set(id, listener);
+            f.vars.add(vRep);
+            return true;
         }
-        f.vars.add(vRep);
+        return false;
     }
 
     /**
@@ -427,29 +449,26 @@ export default class Solver {
     }
 
     /**
-     * Adds a package neighbor relation.
-     * By default also notifies listeners.
+     * Adds a package neighbor relation and notifies listeners.
      */
-    addPackageNeighbor(k1: PackageInfo, k2: PackageInfo, propagate: boolean = true) {
+    addPackageNeighbor(k1: PackageInfo, k2: PackageInfo) {
         if (options.readNeighbors) {
-            this.addPackageNeighborPrivate(k1, k2, propagate);
-            this.addPackageNeighborPrivate(k2, k1, propagate);
+            this.addPackageNeighborPrivate(k1, k2);
+            this.addPackageNeighborPrivate(k2, k1);
         }
     }
 
-    private addPackageNeighborPrivate(k: PackageInfo, neighbor: PackageInfo, propagate: boolean = true) {
+    private addPackageNeighborPrivate(k: PackageInfo, neighbor: PackageInfo) {
         const f = this.fragmentState;
         const s = mapGetSet(f.packageNeighbors, k);
         if (!s.has(neighbor)) {
             s.add(neighbor);
-            if (propagate) {
-                const ts = f.packageNeighborListeners.get(k);
-                if (ts)
-                    for (const listener of ts.values()) {
-                        this.enqueueListenerCall([listener, neighbor]);
-                        this.diagnostics.packageNeighborListenerNotifications++;
-                    }
-            }
+            const ts = f.packageNeighborListeners.get(k);
+            if (ts)
+                for (const listener of ts.values()) {
+                    this.enqueueListenerCall([listener, neighbor]);
+                    this.diagnostics.packageNeighborListenerNotifications++;
+                }
         }
     }
 
@@ -463,45 +482,44 @@ export default class Solver {
         if (logger.isDebugEnabled())
             logger.debug(`Adding ancestors constraint to ${t} ${opts.n ? `at ${nodeToString(opts.n)}` : `${TokenListener[key]} ${opts.s}`}`);
         const id = this.getListenerID({...opts, l: key, t});
-        this.callTokenListener(id, listener, t, true); // ancestry is reflexive
-        const g = this.globalState.globalSpecialNatives;
-        if (g) { // (not set when called from unit tests)
-            if (t instanceof ObjectToken)
-                this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
-            else if (t instanceof ArrayToken) {
-                this.callTokenListener(id, listener, g.get(ARRAY_PROTOTYPE)!);
-                this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
-            } else if (t instanceof FunctionToken || t instanceof PrototypeToken || t instanceof ClassToken) {
-                this.callTokenListener(id, listener, g.get(FUNCTION_PROTOTYPE)!);
-                this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
-            } else if (t instanceof AllocationSiteToken) {
-                if (t.kind === "Promise")
-                    this.callTokenListener(id, listener, g.get(PROMISE_PROTOTYPE)!);
-                else if (t.kind === "Date")
-                    this.callTokenListener(id, listener, g.get(DATE_PROTOTYPE)!);
-                else if (t.kind === "RegExp")
-                    this.callTokenListener(id, listener, g.get(REGEXP_PROTOTYPE)!);
-                else if (t.kind === "Error")
-                    this.callTokenListener(id, listener, g.get(ERROR_PROTOTYPE)!);
-                else if (t.kind === "Map")
-                    this.callTokenListener(id, listener, g.get(MAP_PROTOTYPE)!);
-                else if (t.kind === "Set")
-                    this.callTokenListener(id, listener, g.get(SET_PROTOTYPE)!);
-                else if (t.kind === "WeakMap")
-                    this.callTokenListener(id, listener, g.get(WEAKMAP_PROTOTYPE)!);
-                else if (t.kind === "WeakSet")
-                    this.callTokenListener(id, listener, g.get(WEAKSET_PROTOTYPE)!);
-                else if (t.kind === "WeakRef")
-                    this.callTokenListener(id, listener, g.get(WEAKREF_PROTOTYPE)!);
-                else if (t.kind === "PromiseResolve" || t.kind === "PromiseReject")
+        const anc = this.fragmentState.getRepresentative(this.varProducer.ancestorsVar(t));
+        if (this.addForAllTokensConstraintPrivate(anc, id, listener)) {
+            this.callTokenListener(id, listener, t, true); // ancestry is reflexive
+            const g = this.globalState.globalSpecialNatives;
+            if (g) { // (not set when called from unit tests)
+                if (t instanceof ObjectToken)
+                    this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
+                else if (t instanceof ArrayToken) {
+                    this.callTokenListener(id, listener, g.get(ARRAY_PROTOTYPE)!);
+                    this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
+                } else if (t instanceof FunctionToken || t instanceof PrototypeToken || t instanceof ClassToken) {
                     this.callTokenListener(id, listener, g.get(FUNCTION_PROTOTYPE)!);
-                this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
+                    this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
+                } else if (t instanceof AllocationSiteToken) {
+                    if (t.kind === "Promise")
+                        this.callTokenListener(id, listener, g.get(PROMISE_PROTOTYPE)!);
+                    else if (t.kind === "Date")
+                        this.callTokenListener(id, listener, g.get(DATE_PROTOTYPE)!);
+                    else if (t.kind === "RegExp")
+                        this.callTokenListener(id, listener, g.get(REGEXP_PROTOTYPE)!);
+                    else if (t.kind === "Error")
+                        this.callTokenListener(id, listener, g.get(ERROR_PROTOTYPE)!);
+                    else if (t.kind === "Map")
+                        this.callTokenListener(id, listener, g.get(MAP_PROTOTYPE)!);
+                    else if (t.kind === "Set")
+                        this.callTokenListener(id, listener, g.get(SET_PROTOTYPE)!);
+                    else if (t.kind === "WeakMap")
+                        this.callTokenListener(id, listener, g.get(WEAKMAP_PROTOTYPE)!);
+                    else if (t.kind === "WeakSet")
+                        this.callTokenListener(id, listener, g.get(WEAKSET_PROTOTYPE)!);
+                    else if (t.kind === "WeakRef")
+                        this.callTokenListener(id, listener, g.get(WEAKREF_PROTOTYPE)!);
+                    else if (t.kind === "PromiseResolve" || t.kind === "PromiseReject")
+                        this.callTokenListener(id, listener, g.get(FUNCTION_PROTOTYPE)!);
+                    this.callTokenListener(id, listener, g.get(OBJECT_PROTOTYPE)!);
+                }
             }
         }
-        this.addForAllTokensConstraintPrivate(
-            this.fragmentState.getRepresentative(this.varProducer.ancestorsVar(t)),
-            id, listener,
-        );
     }
 
     /*
@@ -555,11 +573,10 @@ export default class Solver {
     }
 
     /**
-     * Adds an array numeric property.
+     * Adds an array numeric property and notifies listeners.
      * Non-numeric properties are ignored.
-     * By default also notifies listeners.
      */
-    addArrayEntry(a: ArrayToken, prop: string, propagate: boolean = true) {
+    addArrayEntry(a: ArrayToken, prop: string, merging: boolean = false) {
         if (!isArrayIndex(prop)) // TODO: treat large indices as "unknown"?
             return;
         const f = this.fragmentState;
@@ -568,20 +585,19 @@ export default class Solver {
             if (logger.isDebugEnabled())
                 logger.debug(`Adding array entry ${a}[${prop}]`);
             ps.add(prop);
-            if (propagate) {
-                const ts = f.arrayEntriesListeners.get(a);
-                if (ts)
-                    for (const listener of ts.values()) {
-                        this.enqueueListenerCall([listener, prop]);
-                        this.diagnostics.arrayEntriesListenerNotifications++;
-                    }
+            const ts = f.arrayEntriesListeners.get(a);
+            if (ts)
+                for (const listener of ts.values()) {
+                    this.enqueueListenerCall([listener, prop]);
+                    this.diagnostics.arrayEntriesListenerNotifications++;
+                }
+            if (!merging) {
+                // add flow to summary var
+                this.addSubsetEdge(
+                    f.getRepresentative(f.varProducer.objPropVar(a, prop)),
+                    f.getRepresentative(f.varProducer.arrayAllVar(a))
+                );
             }
-            // add flow to summary var
-            this.addSubsetEdge(
-                f.getRepresentative(f.varProducer.objPropVar(a, prop)),
-                f.getRepresentative(f.varProducer.arrayAllVar(a)),
-                propagate,
-            );
         }
     }
 
@@ -625,17 +641,16 @@ export default class Solver {
     }
 
     /**
-     * Adds an object property.
-     * By default also notifies listeners.
+     * Adds an object property and notifies listeners.
      */
-    addObjectProperty(a: ObjectPropertyVarObj, prop: string, propagate: boolean = true) {
+    addObjectProperty(a: ObjectPropertyVarObj, prop: string, merging: boolean = false) {
         const f = this.fragmentState;
         const ps = mapGetSet(f.objectProperties, a);
         if (!ps.has(prop)) {
             if (logger.isDebugEnabled())
                 logger.debug(`Adding object property ${a}.${prop}`);
             ps.add(prop);
-            if (propagate && !isInternalProperty(prop)) {
+            if (!isInternalProperty(prop)) {
                 const ts = f.objectPropertiesListeners.get(a);
                 if (ts)
                     for (const listener of ts.values()) {
@@ -643,56 +658,24 @@ export default class Solver {
                         this.diagnostics.objectPropertiesListenerNotifications++;
                     }
             }
-            if (a instanceof ArrayToken && prop === ARRAY_UNKNOWN)
-                // add flow to summary var
-                this.addSubsetEdge(
-                    f.getRepresentative(f.varProducer.arrayUnknownVar(a)),
-                    f.getRepresentative(f.varProducer.arrayAllVar(a)),
-                    propagate,
-                );
-            if (prop === INTERNAL_PROTOTYPE()) {
-                // constraint: ∀ b ∈ ⟦a.__proto__⟧: {b} ∪ Ancestors(b) ⊆ Ancestors(a)
-                this.addForAllTokensConstraint(f.varProducer.objPropVar(a, prop), TokenListener.ANCESTORS, {t: a}, (b: Token) => {
-                    const aVar = this.varProducer.ancestorsVar(a);
-                    this.addTokenConstraint(b, aVar);
-                    if (isObjectPropertyVarObj(b))
-                        this.addSubsetConstraint(this.varProducer.ancestorsVar(b), aVar);
-                });
+            if (!merging) {
+                if (a instanceof ArrayToken && prop === ARRAY_UNKNOWN)
+                    // add flow to summary var
+                    this.addSubsetEdge(
+                        f.getRepresentative(f.varProducer.arrayUnknownVar(a)),
+                        f.getRepresentative(f.varProducer.arrayAllVar(a))
+                    );
+                if (prop === INTERNAL_PROTOTYPE()) {
+                    // constraint: ∀ b ∈ ⟦a.__proto__⟧: {b} ∪ Ancestors(b) ⊆ Ancestors(a)
+                    this.addForAllTokensConstraint(f.varProducer.objPropVar(a, prop), TokenListener.ANCESTORS, {t: a}, (b: Token) => {
+                        const aVar = this.varProducer.ancestorsVar(a);
+                        this.addTokenConstraint(b, aVar);
+                        if (isObjectPropertyVarObj(b))
+                            this.addSubsetConstraint(this.varProducer.ancestorsVar(b), aVar);
+                    });
+                }
             }
         }
-    }
-
-    /**
-     * Collects property read operations.
-     * @param typ the type of the property read operation
-     * @param result the constraint variable for the result of the property read operation
-     * @param base the constraint variable for the base expression
-     * @param pck the current package object token
-     * @param prop the property name
-     * @param node AST node
-     * @param enclosing enclosing function or module
-     */
-    collectPropertyRead(
-        typ: "read" | "call", result: ConstraintVar | undefined, base: ConstraintVar | undefined,
-        pck: PackageObjectToken | undefined, prop: string | undefined, node: Node, enclosing: FunctionInfo | ModuleInfo
-    ) { // TODO: rename to registerPropertyRead, move to FragmentState
-        if (typ === "read" && result && base && pck)
-            this.fragmentState.maybeEmptyPropertyReads.push({typ, result, base, pck, prop});
-        else if (typ === "call" && base && prop)
-            // call with @Unknown already happens when prop is undefined, so we only need to register
-            // the property read for patching if the property is known
-            this.fragmentState.maybeEmptyPropertyReads.push({typ, base, prop});
-        if (base && prop)
-            this.fragmentState.propertyReads.push({base, prop, node, enclosing});
-    }
-
-    /**
-     * Collects dynamic property write operations.
-     * @param base the constraint variable for the base expression
-     */
-    collectDynamicPropertyWrite(base: ConstraintVar | undefined) { // TODO: rename to registerDynamicPropertyWrite, move to FragmentState
-        if (base)
-            this.fragmentState.dynamicPropertyWrites.add(base);
     }
 
     /**
@@ -801,11 +784,12 @@ export default class Solver {
      */
     processTokens(v: RepresentativeVar) {
         const ts = this.unprocessedTokens.get(v);
-        if (ts) {
+        if (ts !== undefined) {
+            const size = Array.isArray(ts) ? ts.length : 1;
             if (logger.isDebugEnabled())
-                logger.debug(`Worklist size: ${this.diagnostics.unprocessedTokensSize}, propagating ${ts.length} token${ts.length !== 1 ? "s" : ""} from ${v}`);
+                logger.debug(`Worklist size: ${this.diagnostics.unprocessedTokensSize}, propagating ${size} token${size !== 1 ? "s" : ""} from ${v}`);
             this.unprocessedTokens.delete(v);
-            this.diagnostics.unprocessedTokensSize -= ts.length;
+            this.diagnostics.unprocessedTokensSize -= size;
             // propagate new tokens to successors
             const f = this.fragmentState;
             assert(f.vars.has(v));
@@ -813,20 +797,14 @@ export default class Solver {
             if (s) {
                 for (const to of s)
                     this.addTokens(ts, to);
-                this.incrementIterations();
+                this.incrementPropagations();
             }
-            // notify listeners
-            const tr = f.tokenListeners.get(v);
-            if (tr)
-                for (const t of ts)
-                    for (const [id, listener] of tr)
-                        this.callTokenListener(id, listener, t);
         }
     }
 
-    incrementIterations() {
-        this.diagnostics.iterations++;
-        if (this.diagnostics.iterations % 100 === 0) {
+    incrementPropagations() {
+        this.diagnostics.propagations++;
+        if (this.diagnostics.propagations % 100 === 0) {
             this.globalState.timeoutTimer.checkTimeout();
             this.printDiagnostics();
         }
@@ -836,23 +814,23 @@ export default class Solver {
      * Processes all items in the worklist until a fixpoint is reached.
      * This notifies listeners and propagates tokens along subset edges.
      */
-    async propagate() {
+    async propagate(phase: Phase) {
+        this.phase = phase;
         if (logger.isDebugEnabled())
             logger.debug("Processing constraints until fixpoint...");
         const f = this.fragmentState;
         f.a.timeoutTimer.checkTimeout();
         await this.checkAbort();
         if (logger.isVerboseEnabled())
-            logger.verbose(`Propagating (${this.unprocessedTokens.size}, ${this.nodesWithNewEdges.size}, ${this.restored.size}, ${f.postponedListenerCalls.length})`);
-        let round = 0;
+            logger.verbose(`Propagating (tokens: ${this.unprocessedTokens.size}, nodes: ${this.nodesWithNewEdges.size}, restored: ${this.restored.size}, listeners: ${f.postponedListenerCalls.length})`);
+        let wave = 1;
         while (this.unprocessedTokens.size > 0 || this.nodesWithNewEdges.size > 0 || this.restored.size > 0 || f.postponedListenerCalls.length > 0) {
-            round++;
-            this.diagnostics.fixpointRound = round;
+            this.diagnostics.wave = wave;
             if (logger.isVerboseEnabled())
-                logger.verbose(`Fixpoint round: ${round} (call edges: ${f.numberOfFunctionToFunctionEdges}, vars: ${f.getNumberOfVarsWithTokens()}, tokens: ${f.numberOfTokens}, subsets: ${f.numberOfSubsetEdges})`);
-            if (options.maxRounds !== undefined && round > options.maxRounds) {
-                f.warn("Fixpoint round limit reached, aborting propagation");
-                this.diagnostics.roundLimitReached++;
+                logger.verbose(`Fixpoint wave: ${wave} (call edges: ${f.numberOfCallToFunctionEdges}, vars: ${f.getNumberOfVarsWithTokens()}, tokens: ${f.numberOfTokens}, subsets: ${f.numberOfSubsetEdges})`);
+            if (options.maxWaves !== undefined && wave > options.maxWaves) {
+                f.warn("Fixpoint wave limit reached, aborting propagation");
+                this.diagnostics.waveLimitReached++;
                 this.diagnostics.unprocessedTokensSize = 0;
                 this.unprocessedTokens.clear();
                 this.nodesWithNewEdges.clear();
@@ -877,7 +855,7 @@ export default class Solver {
                         // cycle elimination
                         for (const [v, rep] of repmap)
                             this.redirect(v, rep); // TODO: this includes processing pending edges and tokens for v, which may be unnecessary?
-                        this.diagnostics.totalCycleEliminationTime += timer1.elapsedCPU();
+                        this.diagnostics.totalCycleEliminationTime += timer1.elapsed();
                         this.diagnostics.totalCycleEliminationRuns++;
                         const timer2 = new Timer();
                         // process new tokens for the component representatives in topological order
@@ -888,7 +866,7 @@ export default class Solver {
                             this.processTokens(v);
                             await this.checkAbort(true);
                         }
-                        this.diagnostics.totalPropagationTime += timer2.elapsedCPU();
+                        this.diagnostics.totalPropagationTime += timer2.elapsed();
                         this.nodesWithNewEdges.clear();
                         this.restored.clear();
                     }
@@ -896,7 +874,7 @@ export default class Solver {
                     const timer3 = new Timer();
                     for (const v of this.unprocessedTokens.keys())
                         this.processTokens(v);
-                    this.diagnostics.totalPropagationTime += timer3.elapsedCPU();
+                    this.diagnostics.totalPropagationTime += timer3.elapsed();
                 } else {
                     // process all tokens in worklist until empty
                     if (logger.isVerboseEnabled())
@@ -908,30 +886,34 @@ export default class Solver {
                         this.processTokens(v);
                         await this.checkAbort(true);
                     }
-                    this.diagnostics.totalPropagationTime += timer.elapsedCPU();
+                    this.diagnostics.totalPropagationTime += timer.elapsed();
                 }
             }
             if (this.unprocessedTokens.size !== 0 || this.diagnostics.unprocessedTokensSize !== 0 || this.nodesWithNewEdges.size !== 0 || this.restored.size !== 0)
                 assert.fail(`worklist non-empty: unprocessedTokens.size: ${this.unprocessedTokens.size}, unprocessedTokensSize: ${this.diagnostics.unprocessedTokensSize}, nodesWithNewEdges.size: ${this.nodesWithNewEdges.size}, restored.size: ${this.restored.size}`);
-            // process all enqueued listener calls (excluding those created during the processing)
+            // process all enqueued listener calls (including those created during the processing)
             if (logger.isVerboseEnabled())
                 logger.verbose(`Processing listener calls: ${f.postponedListenerCalls.length}`);
             if (f.postponedListenerCalls.length > 0) {
                 const timer = new Timer();
                 this.diagnostics.listenerNotificationRounds++;
-                const calls = Array.from(f.postponedListenerCalls);
-                f.postponedListenerCalls.length = 0;
                 let count = 0;
-                for (const [fun, arg] of calls) {
+                for (const [fun, arg] of f.postponedListenerCalls) {
                     fun(arg as any);
                     if (++count % 100 === 0) {
                         f.a.timeoutTimer.checkTimeout();
                         this.printDiagnostics();
                     }
                 }
-                this.diagnostics.totalListenerCallTime += timer.elapsedCPU();
+                f.postponedListenerCalls.length = 0;
+                this.diagnostics.totalListenerCallTime += timer.elapsed();
             }
+            if (logger.isVerboseEnabled())
+                logger.verbose(`Wave ${wave} completed after ${nanoToMs(this.timer.elapsed())}`);
+            wave++;
         }
+        if (logger.isVerboseEnabled() || options.diagnostics)
+            logger.info(`${isTTY ? GREY : ""}Phase: ${this.phase}, completed after ${nanoToMs(this.timer.elapsed())} (call edges: ${f.numberOfCallToFunctionEdges}, vars: ${f.getNumberOfVarsWithTokens()}, tokens: ${f.numberOfTokens}, subsets: ${f.numberOfSubsetEdges})${isTTY ? RESET : ""}`);
         if (this.diagnostics.unprocessedTokensSize !== 0)
             assert.fail(`unprocessedTokensSize non-zero after propagate: ${this.diagnostics.unprocessedTokensSize}`);
     }
@@ -939,9 +921,9 @@ export default class Solver {
     async checkAbort(throttle: boolean = false) {
         if (this.abort) {
             if (throttle) {
-                if (this.diagnostics.iterations < this.fixpointIterationsThrottled + 1000)
+                if (this.diagnostics.propagations < this.propagationsThrottled + 10000)
                     return;
-                this.fixpointIterationsThrottled = this.diagnostics.iterations;
+                this.propagationsThrottled = this.diagnostics.propagations;
             }
             await setImmediate(); // gives the server a chance to process abort requests
             if (this.abort()) {
@@ -956,12 +938,14 @@ export default class Solver {
      */
     prepare() {
         this.fragmentState = new FragmentState(this);
+        this.phase = "init";
     }
 
     /**
      * Merges the given fragment state into the current fragment state.
      */
-    merge(_s: FragmentState, propagate: boolean) { // TODO: reconsider use of 'propagate' flag
+    merge(_s: FragmentState) {
+        this.phase = "merging";
         const timer = new Timer();
         // use a different type for s' representative variables to prevent accidental mixups
         const s = _s as unknown as FragmentState<MergeRepresentativeVar>;
@@ -993,19 +977,20 @@ export default class Solver {
             f.vars.add(vRep);
             const ntr = s.tokenListeners.get(v);
             const svs = s.subsetEdges.get(v);
-            if (propagate) {
-                // run new token listeners on existing tokens
-                if (ntr)
-                    for (const t of f.getTokens(vRep))
+            // run new token listeners on existing tokens that are not also in new
+            if (ntr) {
+                const vHas = s.getHas(v);
+                for (const t of f.getTokens(vRep))
+                    if (!vHas(t))
                         for (const [id, listener] of ntr)
                             this.callTokenListener(id, listener, t);
-                // propagate existing tokens along new subset edges
-                if (svs)
-                    for (const v2 of svs)
-                        this.addTokens(f.getTokens(vRep), f.getRepresentative(v2));
             }
+            // propagate existing tokens along new subset edges
+            if (svs)
+                for (const v2 of svs)
+                    this.addTokens(f.getTokens(vRep), f.getRepresentative(v2));
             // add new tokens (if propagate set, also trigger existing listeners and propagate along existing subset edges)
-            this.addTokens(s.getTokens(v), vRep, propagate);
+            this.addTokens(s.getTokens(v), vRep);
             // add new listeners
             if (ntr)
                 for (const [id, listener] of ntr)
@@ -1027,17 +1012,17 @@ export default class Solver {
         // add new object properties and array entries
         for (const [t, props] of s.objectProperties)
             for (const prop of props)
-                this.addObjectProperty(t, prop, propagate);
+                this.addObjectProperty(t, prop, true);
         for (const [t, entries] of s.arrayEntries)
             for (const entry of entries)
-                this.addArrayEntry(t, entry, propagate);
+                this.addArrayEntry(t, entry, true);
         // add new array entry listeners and object property listeners
         mapMapSetAll(s.arrayEntriesListeners, f.arrayEntriesListeners);
         mapMapSetAll(s.objectPropertiesListeners, f.objectPropertiesListeners);
         // add new package neighbors and listeners
         for (const [k, ns] of s.packageNeighbors)
             for (const n of ns)
-                this.addPackageNeighbor(k, n, propagate);
+                this.addPackageNeighbor(k, n);
         mapMapSetAll(s.packageNeighborListeners, f.packageNeighborListeners);
         // add remaining fragment state
         mapSetAddAll(s.requireGraph, f.requireGraph);
@@ -1059,7 +1044,7 @@ export default class Solver {
         addAll(s.callsWithResultMaybeUsedAsPromise, f.callsWithResultMaybeUsedAsPromise);
         mapSetAddAll(s.functionParameters, f.functionParameters);
         addAll(s.invokedExpressions, f.invokedExpressions);
-        addAll(s.maybeEscapingFromModule, f.maybeEscapingFromModule);
+        addAll(s.maybeEscaping, f.maybeEscaping);
         addAll(s.widened, f.widened);
         mapSetAddAll(s.maybeEscapingToExternal, f.maybeEscapingToExternal);
         setAll(s.unhandledDynamicPropertyWrites, f.unhandledDynamicPropertyWrites);
@@ -1077,6 +1062,6 @@ export default class Solver {
         pushAll(s.maybeEmptyPropertyReads, f.maybeEmptyPropertyReads);
         addAll(s.dynamicPropertyWrites, f.dynamicPropertyWrites);
         this.printDiagnostics();
-        this.diagnostics.totalFragmentMergeTime += timer.elapsedCPU();
+        this.diagnostics.totalFragmentMergeTime += timer.elapsed();
     }
 }
