@@ -147,12 +147,13 @@ async function main() {
     }
 
     function sendResponse(res: Response) {
-        const str = JSON.stringify(res);
+        const bigintReplacer = (_k: string, v: any) => (typeof v === "bigint" ? v.toString() : v);
+        const str = JSON.stringify(res, bigintReplacer);
         process.stdout.write(`Content-Length: ${str.length}\r\n\r\n`);
         process.stdout.write(str);
         process.stdout.write("\r\n");
         if (logger.isVerboseEnabled())
-            logger.verbose(`Message sent: ${JSON.stringify(res, undefined, 2)}`);
+            logger.verbose(`Message sent: ${JSON.stringify(res, bigintReplacer, 2)}`);
     }
 
     function sendErrorResponse(message: string, req?: Request) {
