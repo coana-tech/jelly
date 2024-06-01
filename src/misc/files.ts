@@ -51,8 +51,13 @@ export function expand(paths: Array<string> | string): Array<string> {
 }
 
 function* expandRec(path: string, sub: boolean, visited: Set<string>): Generator<string> {
-    path = realpathSync(path);
-    if (!existsSync(path) || visited.has(path))
+    try {
+        path = realpathSync(path);
+    } catch (e) {
+        logger.debug(`Skipping broken symlink ${path}`);
+        return;
+    }
+    if (visited.has(path))
         return;
     visited.add(path);
     const stat = lstatSync(path);
