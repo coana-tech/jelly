@@ -50,7 +50,7 @@ import {exportCallGraphHtml, exportDataFlowGraphHtml} from "./output/visualizer"
 import {VulnerabilityDetector, VulnerabilityResults} from "./patternmatching/vulnerabilitydetector";
 import {readFileSync} from "fs";
 import {getVulnerabilityId, Vulnerability} from "./typings/vulnerabilities";
-import {addAll} from "./misc/util";
+import {addAll, stringify} from "./misc/util";
 import {sep} from "path";
 import {SourceLocation} from "@babel/types";
 
@@ -147,13 +147,12 @@ async function main() {
     }
 
     function sendResponse(res: Response) {
-        const bigintReplacer = (_k: string, v: any) => (typeof v === "bigint" ? v.toString() : v);
-        const str = JSON.stringify(res, bigintReplacer);
+        const str = stringify(res, 0);
         process.stdout.write(`Content-Length: ${str.length}\r\n\r\n`);
         process.stdout.write(str);
         process.stdout.write("\r\n");
         if (logger.isVerboseEnabled())
-            logger.verbose(`Message sent: ${JSON.stringify(res, bigintReplacer, 2)}`);
+            logger.verbose(`Message sent: ${stringify(res)}`);
     }
 
     function sendErrorResponse(message: string, req?: Request) {
