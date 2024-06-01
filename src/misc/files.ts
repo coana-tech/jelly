@@ -52,7 +52,7 @@ export function expand(paths: Array<string> | string): Array<string> {
 
 function* expandRec(path: string, sub: boolean, visited: Set<string>): Generator<string> {
     path = realpathSync(path);
-    if (visited.has(path))
+    if (!existsSync(path) || visited.has(path))
         return;
     visited.add(path);
     const stat = lstatSync(path);
