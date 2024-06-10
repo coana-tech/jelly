@@ -39,52 +39,46 @@ export function expand(paths: Array<string> | string): Array<string> {
     for (const path of paths)
         for (const e of expandRec(resolve(path), false, visited))
             res.push(e); // TODO: complain if e starts with "."? (happens if path is outside basedir)
-    if (options.excludeEntries) {
-        const excl = new Set(micromatch(res, options.excludeEntries));
-        const eres = [];
-        for (const r of res)
-            if (!excl.has(r))
-                eres.push(r);
-        return eres;
-    } else
+    if (options.excludeEntries)
+        return micromatch.not(res, options.excludeEntries);
+    else
         return res;
 }
 
 function* expandRec(path: string, sub: boolean, visited: Set<string>): Generator<string> {
     try {
         path = realpathSync(path);
-    } catch (e) {
-        logger.debug(`Skipping broken symlink ${path}`);
-        return;
-    }
-    if (visited.has(path))
-        return;
-    visited.add(path);
-    const stat = lstatSync(path);
-    const inNodeModules = options.library || path.includes("node_modules");
-    if (stat.isDirectory()) {
-        const base = basename(path);
-        if (!sub ||
-            !(["node_modules", ".git", ".yarn"].includes(base) ||
-                (!inNodeModules && ["out", "build", "dist", "generated", "compiled"].includes(base)))) {
-            const files = readdirSync(path); // TODO: use withFileTypes and dirent.isdirectory()
-            if (!sub || inNodeModules || !files.includes("package.json"))
-                for (const file of files.map(f => resolve(path, f)).sort((f1, f2) => {
-                    // make sure files are ordered before directories
-                    return (lstatSync(f1).isDirectory() ? 1 : 0) - (lstatSync(f2).isDirectory() ? 1 : 0) || f1.localeCompare(f2);
-                }))
-                    yield* expandRec(file, true, visited);
-            else
+        if (visited.has(path))
+            return;
+        visited.add(path);
+        const stat = lstatSync(path);
+        const inNodeModules = options.library || path.includes("node_modules");
+        if (stat.isDirectory()) {
+            const base = basename(path);
+            if (!sub ||
+                !(["node_modules", ".git", ".yarn"].includes(base) ||
+                    (!inNodeModules && ["out", "build", "dist", "generated"].includes(base)))) {
+                const files = readdirSync(path); // TODO: use withFileTypes and dirent.isdirectory()
+                if (!sub || inNodeModules || !files.includes("package.json"))
+                    for (const file of files.map(f => resolve(path, f)).sort((f1, f2) => {
+                        // make sure files are ordered before directories
+                        return (lstatSync(f1).isDirectory() ? 1 : 0) - (lstatSync(f2).isDirectory() ? 1 : 0) || f1.localeCompare(f2);
+                    }))
+                        yield* expandRec(file, true, visited);
+                else
+                    logger.debug(`Skipping directory ${path}`);
+            } else
                 logger.debug(`Skipping directory ${path}`);
-        } else
-            logger.debug(`Skipping directory ${path}`);
-    } else if (stat.isFile() && !path.endsWith(".d.ts") &&
-        (!inNodeModules || !(path.endsWith(".min.js") || path.endsWith(".bundle.js"))) &&
-        (path.endsWith(".js") || path.endsWith(".jsx") || path.endsWith(".es") || path.endsWith(".mjs") || path.endsWith(".cjs") || path.endsWith(".ts") || path.endsWith(".tsx") || path.endsWith(".mts") || path.endsWith(".cts")
-            || isShebang(path)))
-        yield relative(options.basedir, path);
-    else
-        logger.debug(`Skipping file ${path}`);
+        } else if (stat.isFile() && !path.endsWith(".d.ts") &&
+            (!inNodeModules || !(path.endsWith(".min.js") || path.endsWith(".bundle.js"))) &&
+            (path.endsWith(".js") || path.endsWith(".jsx") || path.endsWith(".es") || path.endsWith(".mjs") || path.endsWith(".cjs") || path.endsWith(".ts") || path.endsWith(".tsx") || path.endsWith(".mts") || path.endsWith(".cts")
+                || isShebang(path)))
+            yield relative(options.basedir, path);
+        else
+            logger.debug(`Skipping file ${path}`);
+    } catch {
+        logger.error(`Error: Unable to read ${path}`);
+    }
 }
 
 /**
@@ -160,6 +154,10 @@ export function requireResolve(str: string, file: FilePath, a: GlobalState, node
         f?.warn(`Module '${filepath}' has unrecognized extension, skipping it`, node);
         return undefined;
     }
+    if (options.excludeEntries && a.
+        getModuleInfo(file).packageInfo.isEntry &&
+        micromatch.isMatch(filepath, options.excludeEntries))
+        return undefined; // skip silently
     if (logger.isDebugEnabled())
         logger.debug(`Module '${str}' required from ${file} resolved to: ${filepath}`);
     return filepath;
