@@ -97,7 +97,7 @@ export class Operations {
         return v;
     }
 
-    private getRequireHints(pars: NodePath<Node>): Array<string> | undefined {
+    private getRequireHints(pars: NodePath): Array<string> | undefined {
         return this.a.patching?.getRequireHints((pars.node.loc as Location).module?.toString(), locationToString(pars.node.loc, false, true));
     }
 
@@ -141,9 +141,14 @@ export class Operations {
             this.callFunctionBound(base, t, calleeVar, argVars, resultVar, strings, path);
         };
 
+        const key =
+            p.isMemberExpression() || p.isOptionalMemberExpression() ? TokenListener.CALL_METHOD
+                : (isIdentifier(path.node.callee) && path.node.callee.name === "require") ? TokenListener.CALL_REQUIRE
+                    : TokenListener.CALL_FUNCTION;
+
         // expression E0(E1,...,En) or new E0(E1,...,En)
         // constraint: ∀ functions t ∈ ⟦E0⟧: ...
-        this.solver.addForAllTokensConstraint(calleeVar, TokenListener.CALL_CALLEE, path.node, (t: Token) => handleCall(undefined, t));
+        this.solver.addForAllTokensConstraint(calleeVar, key, path.node, (t: Token) => handleCall(undefined, t));
         // this looks odd for method calls (E0.p(E1,...,En)), but ⟦E0.p⟧ is empty for method calls
         // (see the special case for visitMemberExpression in astvisitor.ts)
         // the constraint is used for method calls when:
@@ -191,7 +196,7 @@ export class Operations {
                     this.solver.fragmentState.registerCall(pars.node, caller, callees);
                     // the node parameter is required as it defines the argument variables, result variable,
                     // and various implicit parameters of native calls
-                    this.solver.addForAllTokensConstraint(callees, TokenListener.CALL_CALLEE, {n: path.node, t},
+                    this.solver.addForAllTokensConstraint(callees, key, {n: path.node, t},
                                                           (ft: Token) => handleCall(t, ft));
                 }
 
@@ -235,7 +240,9 @@ export class Operations {
             this.callFunctionTokenBound(t, base, caller, argVars, resultVar, isNew, path);
         else if (t instanceof NativeObjectToken) {
             f.registerCall(pars.node, caller, undefined, {native: true});
-            if (t.invoke && (!isNew || t.constr))
+            if (options.ignoreImpreciseNativeCalls && calleeVar && f.getTokensSize(f.getRepresentative(calleeVar))[0] > 2)
+                f.warnUnsupported(path.node, `Ignoring imprecise call to ${t}`);
+            else if (t.invoke && (!isNew || t.constr))
                 t.invoke({
                     base,
                     path,

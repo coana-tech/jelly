@@ -89,6 +89,8 @@ program
     .option("--diagnostics-json <file>", "save analysis diagnostics in JSON file")
     .option("--variable-kinds", "report constraint variable kinds")
     .option("--max-waves <number>", "limit number of fixpoint waves")
+    .option("--max-indirections <number>", "limit number of function call and property write indirections")
+    .option("--full-indirection-bounding", "enable indirection bounding for method calls and property reads (use with --max-indirections)")
     .option("--typescript-library-usage <file>", "save TypeScript library usage in JSON file, no analysis")
     .option("--modules-only", "report reachable packages and modules only, no analysis")
     .option("--compare-callgraphs", "compare two call graphs given as JSON files, no analysis")
@@ -104,6 +106,7 @@ program
     .option("--proto", "enable model of assignments to the __proto__ property")
     .option("--obj-spread", "enable model of spread syntax for object literals ({...obj})")
     .option("--native-overwrites", "allow overwriting of native object properties")
+    .option("--ignore-imprecise-native-calls", "ignore imprecise native calls")
     .usage("[options] [files]")
     .addHelpText("after",
         "\nAll modules reachable by require/import from the given files are included in the analysis\n" +

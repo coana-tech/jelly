@@ -13,10 +13,11 @@ Jelly is a static analyzer for performing
 
 for JavaScript (and TypeScript) programs that use the Node.js platform.
 
-The analyzer design is based on ideas from JAM [1], TAPIR [2] and ACG [3] with support for approximate interpretation [4].
+The analyzer design is based on ideas from JAM [1], TAPIR [2] and ACG [3] with support for approximate interpretation [4]
+and indirection-bounding [5].
 Its core is a flow-insensitive control-flow and points-to analysis, together with access paths for tracking library usage.
 It models the main parts of the ECMAScript language and standard library (intentionally not fully soundly!),
-and not (yet) the Node.js standard library.
+and (for now) treats the Node.js standard library as unknown code.
 
 [1] Benjamin Barslev Nielsen, Martin Toldam Torp, Anders Møller:
 [Modular call graph construction for security scanning of Node.js applications](https://dl.acm.org/doi/10.1145/3460319.3464836).
@@ -33,6 +34,10 @@ Proc. ICSE 2013: 752-761
 [4] Mathias Rud Laursen, Wenyuan Xu, Anders Møller:
 [Reducing Static Analysis Unsoundness with Approximate Interpretation](https://dl.acm.org/doi/10.1145/3656424).
 Proc. ACM Program. Lang. 8(PLDI): 194:1-194:24 (2024)
+
+[5] Madhurima Chakraborty, Aakash Gnanakumar, Manu Sridharan, Anders Møller:
+[Indirection-Bounded Call Graph Analysis](https://doi.org/10.4230/LIPIcs.ECOOP.2024.27)
+Proc. ECOOP 2024: 27:1-27:27
 
 ## Installing
 
@@ -69,8 +74,11 @@ To set the heap limit, prefix commands by, for example:
 NODE_OPTIONS=--max-old-space-size=8192
 ```
 
+On Linux, the `vm.max_map_count` system setting also affects how much memory can be used. If changing `--max-old-space-size` in the Node.js options doesn't help,
+try running `sysctl vm.max_map_count` to see the current setting. On a machine with, for example, 64GB RAM, you can change the limit with `sudo sysctl -w vm.max_map_count=524288`.
+
 Note that analyzing with all dependencies (i.e., not using `--ignore-dependencies`) can take a long time.
-The options `--max-rounds` or `--timeout` can be used to terminate the analysis early to provide partial (unsound) results.  
+The options `--max-indirections` or `--timeout` can be used to terminate the analysis early to provide partial (unsound) results.  
 Specific packages can also be included or excluded using `--include-packages` or `--exclude-packages`.
 
 ## How to build
@@ -140,6 +148,13 @@ Alternatively, you can run approximate interpretation and static analysis separa
 ```bash
 jelly --approx-only hints.json tests/helloworld/app.js
 jelly --approx-load hints.json tests/helloworld/app.js
+```
+
+## Indirection bounding
+
+To enable indirection bounding (see reference [5] above), use option `--max-indirections`:
+```bash
+jelly --max-indirections 2 tests/helloworld/app.js
 ```
 
 ## Dynamic call graph construction
