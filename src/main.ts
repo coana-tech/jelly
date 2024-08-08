@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import {analyzeFiles} from "./analysis/analyzer";
-import {closeSync, openSync, readdirSync, readFileSync, unlinkSync} from "fs";
+import {closeSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from "fs";
 import {program} from "commander";
 import logger, {logToFile, setLogLevel} from "./misc/logger";
 import {COPYRIGHT, options, PKG, setDefaultTrackedModules, setOptions, setPatternProperties, VERSION} from "./options";
@@ -24,7 +24,7 @@ import {compareCallGraphs} from "./output/compare";
 import {getMemoryLimit} from "./misc/memory";
 import Solver from "./analysis/solver";
 import {exportCallGraphHtml, exportDataFlowGraphHtml} from "./output/visualizer";
-import {VulnerabilityDetector, VulnerabilityResults} from "./patternmatching/vulnerabilitydetector";
+import {transformPatternMatchVulnerabilitiesToSLMatches as transformMatches, VulnerabilityDetector, VulnerabilityResults} from "./patternmatching/vulnerabilitydetector";
 import {Vulnerability} from "./typings/vulnerabilities";
 import {addAll} from "./misc/util";
 import {getAPIExported, reportAccessPaths, reportAPIExportedFunctions} from "./patternmatching/apiexported";
@@ -107,6 +107,7 @@ program
     .option("--obj-spread", "enable model of spread syntax for object literals ({...obj})")
     .option("--native-overwrites", "allow overwriting of native object properties")
     .option("--ignore-imprecise-native-calls", "ignore imprecise native calls")
+    .option("--matches-file <file>", "save matches in JSON file")
     .usage("[options] [files]")
     .addHelpText("after",
         "\nAll modules reachable by require/import from the given files are included in the analysis\n" +
@@ -317,6 +318,9 @@ async function main() {
                 vr.call = vulnerabilityDetector.findCallsThatMayReachVulnerableFunctions(f, vr.function);
                 vulnerabilityDetector.reportResults(f, vr);
                 vr.matches = vulnerabilityDetector.patternMatch(f, typer, solver.diagnostics);
+                if (options.matchesFile) {
+                    writeFileSync(options.matchesFile, JSON.stringify(transformMatches(vr.matches), null, 2));
+                }
                 // TODO: find functions that may reach functions in vulnerabilities.matches
             }
 

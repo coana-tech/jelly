@@ -47,12 +47,11 @@ import winston from "winston";
 import {tmpdir} from "os";
 import {AnalysisStateReporter} from "./output/analysisstatereporter";
 import {exportCallGraphHtml, exportDataFlowGraphHtml} from "./output/visualizer";
-import {VulnerabilityDetector, VulnerabilityResults} from "./patternmatching/vulnerabilitydetector";
+import {transformPatternMatchVulnerabilitiesToSLMatches, VulnerabilityDetector, VulnerabilityResults} from "./patternmatching/vulnerabilitydetector";
 import {readFileSync} from "fs";
-import {getVulnerabilityId, Vulnerability} from "./typings/vulnerabilities";
+import {Vulnerability} from "./typings/vulnerabilities";
 import {addAll, stringify} from "./misc/util";
 import {sep} from "path";
-import {SourceLocation} from "@babel/types";
 
 const VERSION = require("../package.json").version;
 
@@ -411,20 +410,8 @@ async function main() {
             if (!vulnerabilityDetector || !(options.vulnerabilities || options.vulnerabilitiesJSON)) return prepareResponse(false, req, {message: "Neither options.vulnerabilities and options.vulnerabilitiesJSON have not been set"});
             if (!solver || !files)
                 return prepareResponse(false, req, {message: "Analysis results not available"});
-            const matches = vulnerabilityDetector.patternMatch(solver.fragmentState, typer, solver.diagnostics)
-            const vulnToSLMatches: { [vulnId: string]: string[]} = {}; // vuln to source locations affected.
-            for (const [n, fToVulns] of matches) {
-                const loc = n.loc as SourceLocation & {filename?: string};
-                if (!n.loc) continue;
-                const sl = `${loc.filename}:${loc.start.line}:${loc.start.column + 1}:${loc.end.line}:${loc.end.column + 1}`
-                for (const [_f, vulns] of fToVulns) {
-                    vulns.forEach(v => {
-                        const vulnId = getVulnerabilityId(v);
-                        if (!vulnToSLMatches[vulnId]) vulnToSLMatches[vulnId] = [];
-                        vulnToSLMatches[vulnId].push(sl);
-                    })
-                }
-            }
+            const matches = vulnerabilityDetector.patternMatch(solver.fragmentState, typer, solver.diagnostics);
+            const vulnToSLMatches = transformPatternMatchVulnerabilitiesToSLMatches(matches);
             const res: ReachableVulnAPIsResponse = prepareResponse(true, req, {body: vulnToSLMatches});
             logger.info("Sending reachable vuln apis response");
             return res;
