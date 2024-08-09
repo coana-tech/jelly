@@ -84,6 +84,7 @@ export const options: {
     nativeOverwrites: boolean,
     ignoreImpreciseNativeCalls: boolean,
     matchesFile: string | undefined,
+    reachablePackagesFile: string | undefined,
 } = {
     callgraphHtml: undefined,
     dataflowHtml: undefined,
@@ -159,6 +160,7 @@ export const options: {
     nativeOverwrites: false,
     ignoreImpreciseNativeCalls: false,
     matchesFile: undefined,
+    reachablePackagesFile: undefined,
 };
 
 export function setOptions(opts: OptionValues & Partial<typeof options>) {

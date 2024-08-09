@@ -31,6 +31,7 @@ import {getAPIExported, reportAccessPaths, reportAPIExportedFunctions} from "./p
 import {merge} from "./output/merge";
 import {CallGraph} from "./typings/callgraph";
 import {ProcessManager} from "./approx/processmanager";
+import { getReachablePackages } from "./util";
 
 program
     .name("jelly")
@@ -108,6 +109,7 @@ program
     .option("--native-overwrites", "allow overwriting of native object properties")
     .option("--ignore-imprecise-native-calls", "ignore imprecise native calls")
     .option("--matches-file <file>", "save matches in JSON file")
+    .option("--reachable-packages-file <file>", "saves reachable packages in JSON file")
     .usage("[options] [files]")
     .addHelpText("after",
         "\nAll modules reachable by require/import from the given files are included in the analysis\n" +
@@ -398,6 +400,9 @@ async function main() {
 
             if (options.variableKinds)
                 out.reportVariableKinds();
+
+            if (options.reachablePackagesFile)
+                writeFileSync(options.reachablePackagesFile, JSON.stringify(getReachablePackages(solver), null, 2));
         }
     }
 }

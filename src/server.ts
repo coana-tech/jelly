@@ -52,6 +52,7 @@ import {readFileSync} from "fs";
 import {Vulnerability} from "./typings/vulnerabilities";
 import {addAll, stringify} from "./misc/util";
 import {sep} from "path";
+import { getReachablePackages } from "./util";
 
 const VERSION = require("../package.json").version;
 
@@ -395,12 +396,7 @@ async function main() {
         reachablepackages: async (req: ReachablePackagesRequest) => {
             if (!solver)
                 return prepareResponse(false, req, {message: "Analysis results not available"});
-            const packages: ReachablePackagesResponse["body"] = [];
-            for (const p of solver.globalState.packageInfos.values())
-                packages.push({
-                    name: p.name,
-                    version: p.version
-                });
+            const packages = getReachablePackages(solver);
             const res: ReachablePackagesResponse = prepareResponse(true, req, {body: packages});
             logger.info("Sending reachable packages");
             return res;
