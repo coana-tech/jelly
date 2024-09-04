@@ -99,6 +99,7 @@ import {PropertyAccessPath} from "./accesspaths";
 import {ConstraintVar, isObjectPropertyVarObj} from "./constraintvars";
 import {
     getClass,
+    getEnclosingFunction,
     getExportName,
     getImportName,
     getKey,
@@ -110,7 +111,11 @@ import {
 import {
     ARRAY_UNKNOWN,
     ASYNC_GENERATOR_PROTOTYPE_NEXT,
+    ASYNC_GENERATOR_PROTOTYPE_RETURN,
+    ASYNC_GENERATOR_PROTOTYPE_THROW,
     GENERATOR_PROTOTYPE_NEXT,
+    GENERATOR_PROTOTYPE_RETURN,
+    GENERATOR_PROTOTYPE_THROW,
     PROMISE_FULFILLED_VALUES
 } from "../natives/ecmascript";
 import {Operations} from "./operations";
@@ -272,7 +277,7 @@ export function visit(ast: File, op: Operations) {
                         if (fun.generator) {
                             // find the iterator object (it is returned via Function)
                             // constraint: ... ⊆ ⟦i.value⟧ where i is the iterator object for the function
-                            const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun.body));
+                            const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun));
                             resVar = vp.objPropVar(iter, "value");
                         } else {
                             // constraint: ... ⊆ ⟦ret_f⟧ where f is the enclosing function (ignoring top-level returns)
@@ -306,7 +311,8 @@ export function visit(ast: File, op: Operations) {
                 const msg = cls ? "constructor" : `${name ?? (anon ? "<anonymous>" : "<computed>")}`;
                 if (logger.isVerboseEnabled())
                     logger.verbose(`Reached function ${msg} at ${locationToStringWithFile(fun.loc)}`);
-                a.registerFunctionInfo(op.file, path, name, fun);
+                if (!cls) // FunctionInfos for constructors need to be generated early, see Class
+                    a.registerFunctionInfo(op.file, path, name);
                 if (!name && !anon)
                     f.warnUnsupported(fun, `Dynamic ${isFunctionDeclaration(path.node) || isFunctionExpression(path.node) ? "function" : "method"} name`); // TODO: handle functions/methods with unknown name?
 
@@ -338,9 +344,13 @@ export function visit(ast: File, op: Operations) {
                     // function*
 
                     // constraint: %(Async)Generator.prototype.next ⊆ ⟦i.next⟧ where i is the iterator object for the function
-                    const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun.body));
-                    const iterNext = vp.objPropVar(iter, "next");
+                    const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun));
+                    const iterNext = vp.objPropVar(iter, "next"); // TODO: inherit from Generator.prototype or AsyncGenerator.prototype instead of copying properties
                     solver.addTokenConstraint(op.globalSpecialNatives.get(fun.async ? ASYNC_GENERATOR_PROTOTYPE_NEXT : GENERATOR_PROTOTYPE_NEXT)!, iterNext);
+                    const iterReturn = vp.objPropVar(iter, "return");
+                    solver.addTokenConstraint(op.globalSpecialNatives.get(fun.async ? ASYNC_GENERATOR_PROTOTYPE_RETURN : GENERATOR_PROTOTYPE_RETURN)!, iterReturn);
+                    const iterThrow = vp.objPropVar(iter, "throw");
+                    solver.addTokenConstraint(op.globalSpecialNatives.get(fun.async ? ASYNC_GENERATOR_PROTOTYPE_THROW : GENERATOR_PROTOTYPE_THROW)!, iterThrow);
 
                     // constraint i ∈ ⟦ret_f⟧ where i is the iterator object for the function
                     solver.addTokenConstraint(iter, vp.returnVar(fun));
@@ -493,8 +503,10 @@ export function visit(ast: File, op: Operations) {
                 const key = getKey(path.node);
                 if (key) {
                     if (path.node.value) {
-                        if (!isExpression(path.node.value))
-                            assert.fail(`Unexpected Property value type ${path.node.value?.type} at ${locationToStringWithFile(path.node.loc)}`);
+                        if (!isExpression(path.node.value)) { // TODO: see test262-main/test and TypeScript-main/tests/cases
+                            f.error(`Unexpected Property value type ${path.node.value?.type} at ${locationToStringWithFile(path.node.loc)}`);
+                            return;
+                        }
 
                         if (!options.oldobj) {
 
@@ -646,20 +658,21 @@ export function visit(ast: File, op: Operations) {
 
         Class(path: NodePath<ClassExpression | ClassDeclaration>) {
 
-            let constructor: ClassMethod | undefined;
-            for (const b of path.node.body.body)
-                if (isClassMethod(b) && b.kind === "constructor") {
-                    constructor = b;
+            let constructor: NodePath<ClassMethod> | undefined;
+            for (const b of path.get("body.body") as Array<NodePath>)
+                if (isClassMethod(b.node) && b.node.kind === "constructor") {
+                    constructor = b as NodePath<ClassMethod>;
                     break;
                 }
             assert(constructor); // see extras.ts
-            class2constructor.set(path.node, constructor);
+            class2constructor.set(path.node, constructor.node);
+            a.registerFunctionInfo(op.file, constructor, path.node?.id?.name); // for constructors, use the class name if present
 
             const exported = isExportDeclaration(path.parent);
 
             if (!options.oldobj) {
 
-                const ct = op.newFunctionToken(constructor);
+                const ct = op.newFunctionToken(constructor.node);
 
                 if (isClassExpression(path.node) || exported) {
 
@@ -684,7 +697,7 @@ export function visit(ast: File, op: Operations) {
                         solver.addInherits(ct, w);
 
                         if (w instanceof FunctionToken || w instanceof AccessPathToken) {
-                            const pt = op.newPrototypeToken(constructor!);
+                            const pt = op.newPrototypeToken(constructor.node);
 
                             if (w instanceof FunctionToken) {
 
@@ -692,7 +705,7 @@ export function visit(ast: File, op: Operations) {
                                 solver.addInherits(pt, solver.varProducer.objPropVar(w, "prototype"));
 
                                 // ... ⟦this_ct⟧ ⊆ ⟦this_w⟧
-                                solver.addSubsetConstraint(solver.varProducer.thisVar(constructor!), solver.varProducer.thisVar(w.fun));
+                                solver.addSubsetConstraint(solver.varProducer.thisVar(constructor.node), solver.varProducer.thisVar(w.fun));
 
                                 // ... ⟦return_w⟧ ⊆ ⟦return_ct⟧
                                 solver.addSubsetConstraint(solver.varProducer.returnVar(w.fun), solver.varProducer.returnVar(ct.fun));
@@ -713,7 +726,7 @@ export function visit(ast: File, op: Operations) {
                         // class ... {...}
                         // constraint: t ∈ ⟦class ... {...}⟧ where t denotes the constructor function
                         if (!isParentExpressionStatement(path) || exported)
-                            solver.addTokenConstraint(op.newFunctionToken(constructor), vp.nodeVar(path.node));
+                            solver.addTokenConstraint(op.newFunctionToken(constructor.node), vp.nodeVar(path.node));
                     }
                 } else // no explicit constructor (dyn.ts records a call to an implicit constructor)
                     f.registerArtificialFunction(op.moduleInfo, path.node.loc);
@@ -940,9 +953,9 @@ export function visit(ast: File, op: Operations) {
         },
 
         YieldExpression(path: NodePath<YieldExpression>) {
-            const fun = path.getFunctionParent()?.node;
+            const fun = getEnclosingFunction(path);
             assert(fun, "yield not in function?!");
-            const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun.body));
+            const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", fun));
             const iterValue = vp.objPropVar(iter, "value");
             if (path.node.argument) {
                 if (path.node.delegate) {

@@ -28,7 +28,15 @@ import {
     TypeCastExpression
 } from "@babel/types";
 import {NodePath} from "@babel/traverse";
-import {getAdjustedCallNodePath, getKey, getProperty, isInTryBlockOrBranch, isMaybeUsedAsPromise, isParentExpressionStatement} from "../misc/asthelpers";
+import {
+    getAdjustedCallNodePath,
+    getEnclosingFunction,
+    getKey,
+    getProperty,
+    isInTryBlockOrBranch,
+    isMaybeUsedAsPromise,
+    isParentExpressionStatement
+} from "../misc/asthelpers";
 import {AccessPathToken, AllocationSiteToken, ArrayToken, ClassToken, FunctionToken, NativeObjectToken, ObjectToken, PackageObjectToken, PrototypeToken, Token} from "./tokens";
 import {AccessorType, ConstraintVar, IntermediateVar, isObjectPropertyVarObj, NodeVar, ObjectPropertyVarObj, ReadResultVar} from "./constraintvars";
 import {
@@ -232,8 +240,11 @@ export class Operations {
                         (ft: Token) => handleCall(t, ft));
                 }
 
-                if (t instanceof AccessPathToken && (prop === "call" || prop === "apply"))
-                    this.solver.addAccessPath(new CallResultAccessPath(baseVar!), resultVar, t.ap);
+                if (t instanceof AccessPathToken)
+                    if (prop === "call" || prop === "apply")
+                        this.solver.addAccessPath(new CallResultAccessPath(baseVar!), resultVar, t.ap);
+                    else if (prop === "bind")
+                        this.solver.addTokenConstraint(t, resultVar);
             });
         }
         const strings = args.length >= 1 && isStringLiteral(args[0]) ? [args[0].value] : [];
@@ -374,24 +385,22 @@ export class Operations {
         const argumentsToken = f.functionsWithArguments.has(t.fun) ? this.a.canonicalizeToken(new ArrayToken(t.fun.body)) : undefined;
         for (const [i, arg] of args.entries()) {
             // constraint: ...: ⟦Ei⟧ ⊆ ⟦Xi⟧ for each argument/parameter i (Xi may be a pattern)
-            if (arg) {
-                if (i < t.fun.params.length) {
-                    const param = t.fun.params[i];
-                    if (isRestElement(param)) {
-                        // read the remaining arguments into a fresh array
-                        const rest = args.slice(i);
-                        const t = this.newArrayToken(param);
-                        for (const [i, arg] of rest.entries())
-                            if (arg) // TODO: SpreadElement in arguments (warning emitted below)
-                                addInclusionConstraint(arg, vp.objPropVar(t, String(i)));
-                        this.solver.addTokenConstraint(t, vp.nodeVar(param));
-                    } else
-                        addInclusionConstraint(arg, vp.nodeVar(param));
-                }
-                // constraint ...: ⟦Ei⟧ ⊆ ⟦t_arguments[i]⟧ for each argument i if the function uses 'arguments'
-                if (argumentsToken)
-                    addInclusionConstraint(arg, vp.objPropVar(argumentsToken, String(i)));
+            if (i < t.fun.params.length) {
+                const param = t.fun.params[i];
+                if (isRestElement(param)) {
+                    // read the remaining arguments into a fresh array
+                    const rest = args.slice(i);
+                    const t = this.newArrayToken(param);
+                    for (const [i, rarg] of rest.entries())
+                        if (rarg) // TODO: SpreadElement in arguments (warning emitted below)
+                            addInclusionConstraint(rarg, vp.objPropVar(t, String(i)));
+                    this.solver.addTokenConstraint(t, vp.nodeVar(param));
+                } else if (arg)
+                    addInclusionConstraint(arg, vp.nodeVar(param));
             }
+            // constraint ...: ⟦Ei⟧ ⊆ ⟦t_arguments[i]⟧ for each argument i if the function uses 'arguments'
+            if (argumentsToken && arg)
+                addInclusionConstraint(arg, vp.objPropVar(argumentsToken, String(i)));
         }
         // constraint: ...: t_arguments ∈ ⟦t_arguments⟧ if the function uses 'arguments'
         if (argumentsToken)
@@ -684,7 +693,7 @@ export class Operations {
                     m = this.a.reachedFile(filepath, this.moduleInfo);
 
                     // extend the require graph
-                    const fp = path.getFunctionParent()?.node;
+                    const fp = getEnclosingFunction(path);
                     const from = fp ? this.a.functionInfos.get(fp)! : this.moduleInfo;
                     const to = this.a.moduleInfosByPath.get(filepath)!;
                     f.registerRequireEdge(from, to);
@@ -826,9 +835,10 @@ export class Operations {
                         // read the property using p for the temporary result
                         this.readProperty(src, prop, vp.nodeVar(p), p, this.a.getEnclosingFunctionOrModule(path, this.moduleInfo));
                         // assign the temporary result at p to the locations represented by p.value
-                        if (!isLVal(p.value))
-                            assert.fail(`Unexpected expression ${p.value.type}, expected LVal at ${locationToStringWithFile(p.value.loc)}`);
-                        this.assign(vp.nodeVar(p), p.value, path);
+                        if (isLVal(p.value))
+                            this.assign(vp.nodeVar(p), p.value, path);
+                        else // TODO: see test262-main/test and TypeScript-main/tests/cases
+                            this.solver.fragmentState.error(`Unexpected expression ${p?.value?.type}, expected LVal at ${locationToStringWithFile(p?.value?.loc)}`);
                     }
                 }
         } else if (isArrayPattern(dst)) {
@@ -862,12 +872,11 @@ export class Operations {
             this.assign(src, (dst as TypeCastExpression).expression as any, path);
         else if (isMetaProperty(dst))
             this.solver.fragmentState.warnUnsupported(dst, "MetaProperty"); // TODO: MetaProperty, e.g. new.target
-        else {
-            if (!isRestElement(dst))
-                assert.fail(`Unexpected LVal type ${dst.type} at ${locationToStringWithFile(dst.loc)}`);
+        else if (isRestElement(dst)) {
             // assign the array generated at callFunction to the sub-l-value
             this.assign(vp.nodeVar(dst), dst.argument, path);
-        }
+        } else // TODO: see test262-main/test and TypeScript-main/tests/cases
+           this.solver.fragmentState.error(`Unexpected LVal type ${dst.type} at ${locationToStringWithFile(dst.loc)}`);
     }
 
     /**

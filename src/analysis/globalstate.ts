@@ -1,4 +1,4 @@
-import {Class, Function, Identifier, Node} from "@babel/types";
+import {Function, Identifier, Node} from "@babel/types";
 import {FilePath, getOrSet, Location, locationToString, strHash} from "../misc/util";
 import {
     AncestorsVar,
@@ -25,6 +25,7 @@ import {TSModuleResolver} from "../typescript/moduleresolver";
 import {ProcessManager} from "../approx/processmanager";
 import {Patching} from "../approx/patching";
 import {isDummyConstructor} from "../parsing/extras";
+import {getEnclosingFunction} from "../misc/asthelpers";
 
 /**
  * Global analysis state.
@@ -235,11 +236,12 @@ export class GlobalState {
     /**
      * Registers a new FunctionInfo for a function/method/constructor.
      */
-    registerFunctionInfo(file: FilePath, path: NodePath<Function | Class>, name: string | undefined, fun: Function) {
+    registerFunctionInfo(file: FilePath, path: NodePath<Function>, name: string | undefined) {
+        const fun = path.node;
         const m = this.moduleInfosByPath.get(file)!;
         const f = new FunctionInfo(name, fun.loc!, m, isDummyConstructor(fun));
         this.functionInfos.set(fun, f);
-        const parent = path.getFunctionParent()?.node;
+        const parent = getEnclosingFunction(path);
         (parent ? this.functionInfos.get(parent)!.functions : m.functions).add(f);
         if (this.vulnerabilities)
             this.vulnerabilities.reachedFunction(path, f); // TODO: move to FragmentState?
@@ -328,7 +330,7 @@ export class GlobalState {
      * Finds the nearest enclosing function or module.
      */
     getEnclosingFunctionOrModule(path: NodePath, moduleInfo: ModuleInfo): FunctionInfo | ModuleInfo {
-        const p = path.getFunctionParent()?.node;
+        const p = getEnclosingFunction(path);
         const caller = p ? this.functionInfos.get(p)! : moduleInfo;
         if (!caller)
             assert.fail(`Function/module info not found at ${moduleInfo}:${locationToString(path.node.loc)}!?!`);

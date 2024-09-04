@@ -8,17 +8,19 @@ import {
     ClassPrivateMethod,
     ClassPrivateProperty,
     ClassProperty,
-    Expression,
     Function,
     Identifier,
     ImportDefaultSpecifier,
     ImportSpecifier,
     isArrowFunctionExpression,
     isCallExpression,
+    isClass,
+    isClassMethod,
     isClassPrivateMethod,
     isClassPrivateProperty,
-    isExpression,
+    isClassProperty,
     isExpressionStatement,
+    isFunction,
     isFunctionExpression,
     isIdentifier,
     isImportSpecifier,
@@ -26,7 +28,6 @@ import {
     isMemberExpression,
     isNewExpression,
     isNumericLiteral,
-    isOptionalMemberExpression,
     isParenthesizedExpression,
     isPrivateName,
     isStringLiteral,
@@ -45,7 +46,7 @@ import {
 import assert from "assert";
 import {CallNodePath} from "../natives/nativebuilder";
 import {FragmentState} from "../analysis/fragmentstate";
-import {Location} from "./util";
+import {Location, locationToStringWithFileAndEnd, nodeToString} from "./util";
 
 export type CallNode = CallExpression | OptionalCallExpression | NewExpression;
 
@@ -106,22 +107,6 @@ export function isCalleeExpression(path: NodePath): boolean {
 }
 
 /**
- * Returns the base expression and property of the given method call, or undefined if not applicable.
- */
-export function getBaseAndProperty(path: CallNodePath): {base: Expression, property: string | undefined} | undefined {
-    let p: NodePath | null = path.get("callee") as NodePath;
-    while (isParenthesizedExpression(p.node))
-        p = p.get("expression") as NodePath;
-    if (!(isMemberExpression(p.node) || isOptionalMemberExpression(p.node)))
-        return undefined;
-    const base = p.node.object;
-    if (!isExpression(base)) // excluding Super
-        return undefined;
-    const property = getProperty(p.node);
-    return {base, property};
-}
-
-/**
  * Finds the exported property name for an export specifier.
  */
 export function getExportName(exported: Identifier | StringLiteral): string {
@@ -147,7 +132,7 @@ export function getClass(path: NodePath<any>): Class | undefined {
  * for calls by the dynamic analysis, which has wrong source locations for calls
  * in certain parenthesized expressions.
  */
-export function getAdjustedCallNodePath(path: CallNodePath): NodePath {
+export function getAdjustedCallNodePath(path: CallNodePath): NodePath { // XXX: remove with new dyn.ts?
     return isParenthesizedExpression(path.parentPath.node) &&
     (isNewExpression(path.node) ||
         (!isParenthesizedExpression(path.node.callee) && !isFunctionExpression(path.node.callee))) ?
@@ -203,7 +188,10 @@ export function registerArtificialClassPropertyInitializer(f: FragmentState, pat
         const tokens = (path.hub as unknown as {file: BabelFile}).
             file.ast.tokens as Array<{start: number, loc: SourceLocation, type: any}>;
         const keyStart = path.node.key.start;
-        assert(tokens && typeof keyStart === "number");
+        if (!(tokens && typeof keyStart === "number")) { // TODO: see test262-main/test and TypeScript-main/tests/cases
+            f.error(`Unexpected key.start ${keyStart} at ${locationToStringWithFileAndEnd(path.node.loc)}`);
+            return;
+        }
         let lo = 0;
         for (let hi = tokens.length; lo < hi;) {
             const mid = (lo + hi) >>> 1;
@@ -212,7 +200,10 @@ export function registerArtificialClassPropertyInitializer(f: FragmentState, pat
             else
                 lo = mid + 1;
         }
-        assert(lo >= 1 && tokens[lo].start === keyStart && tokens[lo-1].type.label === "[");
+        if (!(lo >= 1 && tokens[lo].start === keyStart && tokens[lo-1].type.label === "[")) { // TODO: see test262-main/test and TypeScript-main/tests/cases
+            f.error(`Unexpected label ${tokens[lo - 1].type.label} at ${locationToStringWithFileAndEnd(path.node.loc)}`);
+            return;
+        }
         sl = tokens[lo-1].loc;
     }
     const m = (path.node.loc as Location).module;
@@ -221,12 +212,41 @@ export function registerArtificialClassPropertyInitializer(f: FragmentState, pat
 }
 
 /**
+ * Returns the path for the enclosing function, or undefined if no such function.
+ * Positions in default parameters belong to the function being defined.
+ * Positions in computed function names belong to the enclosing function of the function being defined.
+ * Positions in instance member initializers belong to the class constructor.
+ */
+function getEnclosingFunctionPath(path: NodePath): NodePath<Function> | null {
+    let p: NodePath | null = path, c: Node | undefined = undefined, cc: Node | undefined = undefined;
+    do {
+        cc = c;
+        c = p.node;
+        p = p?.parentPath;
+        if (p && isClass(p.node) && (isClassProperty(cc) || isClassPrivateProperty(cc)) && !cc.static) {
+            for (const b of p.get("body.body") as Array<NodePath>)
+                if (isClassMethod(b.node) && b.node.kind === "constructor")
+                    return b as NodePath<ClassMethod>;
+            assert.fail(`Constructor not found for class ${nodeToString(p.node)}`);
+        }
+    } while (p && (!isFunction(p.node) || ("id" in p.node && p.node.id === c) || ("key" in p.node && p.node.key === c)));
+    return p as NodePath<Function> | null;
+}
+
+/**
  * Returns the enclosing non-arrow function, or undefined if no such function.
  */
 export function getEnclosingNonArrowFunction(path: NodePath): Function | undefined {
-    let p: NodePath | NodePath<Function> | null | undefined = path, f: Function | undefined;
+    let p: NodePath | null = path;
     do {
-        f = (p = p?.getFunctionParent())?.node;
-    } while (f && isArrowFunctionExpression(f));
-    return f;
+        p = getEnclosingFunctionPath(p!);
+    } while (p && isArrowFunctionExpression(p.node));
+    return p?.node as Function | undefined;
+}
+
+/**
+ * Returns the enclosing function, or undefined if no such function.
+ */
+export function getEnclosingFunction(path: NodePath): Function | undefined {
+    return getEnclosingFunctionPath(path)?.node;
 }

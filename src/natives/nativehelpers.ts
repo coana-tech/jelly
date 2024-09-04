@@ -1,4 +1,12 @@
-import {CallExpression, Expression, isExpression, isIdentifier, isObjectExpression, isObjectProperty} from "@babel/types";
+import {
+    CallExpression,
+    Expression,
+    isExpression,
+    isFunction,
+    isIdentifier,
+    isObjectExpression,
+    isObjectProperty
+} from "@babel/types";
 import {AccessPathToken, AllocationSiteToken, ArrayToken, ClassToken, FunctionToken, NativeObjectToken, ObjectKind, ObjectToken, PackageObjectToken, PrototypeToken, Token} from "../analysis/tokens";
 import {getKey, isParentExpressionStatement} from "../misc/asthelpers";
 import {Node} from "@babel/core";
@@ -8,6 +16,8 @@ import {
     ERROR_PROTOTYPE,
     FUNCTION_PROTOTYPE,
     GENERATOR_PROTOTYPE_NEXT,
+    GENERATOR_PROTOTYPE_RETURN,
+    GENERATOR_PROTOTYPE_THROW,
     INTERNAL_PROTOTYPE,
     MAP_KEYS,
     MAP_PROTOTYPE,
@@ -246,8 +256,12 @@ export function returnIterator(kind: IteratorKind, p: NativeFunctionParams) { //
         if (t instanceof AllocationSiteToken) {
             const iter = a.canonicalizeToken(new AllocationSiteToken("Iterator", t.allocSite));
             p.solver.addTokenConstraint(iter, vp.expVar(p.path.node, p.path));
-            const iterNext = vp.objPropVar(iter, "next");
+            const iterNext = vp.objPropVar(iter, "next"); // TODO: inherit from Generator.prototype instead of copying properties
             p.solver.addTokenConstraint(p.globalSpecialNatives.get(GENERATOR_PROTOTYPE_NEXT)!, iterNext);
+            const iterReturn = vp.objPropVar(iter, "return");
+            p.solver.addTokenConstraint(p.globalSpecialNatives.get(GENERATOR_PROTOTYPE_RETURN)!, iterReturn);
+            const iterThrow = vp.objPropVar(iter, "throw");
+            p.solver.addTokenConstraint(p.globalSpecialNatives.get(GENERATOR_PROTOTYPE_THROW)!, iterThrow);
             switch (kind) {
                 case "ArrayKeys": {
                     if (t.kind !== "Array")
@@ -336,7 +350,11 @@ type CallbackKind =
     "Promise.prototype.then$onFulfilled" |
     "Promise.prototype.then$onRejected" |
     "Promise.prototype.catch$onRejected" |
-    "Promise.prototype.finally$onFinally";
+    "Promise.prototype.finally$onFinally" |
+    "queueMicrotask" |
+    "setImmediate" |
+    "setInterval" |
+    "setTimeout";
 
 /**
  * Models call to a callback.
@@ -346,12 +364,8 @@ export function invokeCallback(kind: CallbackKind, p: NativeFunctionParams, arg:
     if (args.length > arg) {
         const funarg = args[arg];
         const bt = p.base;
-        if (isExpression(funarg) && // TODO: SpreadElement? non-MemberExpression?
-                // this is for feature parity with the old pair constraint:
-                (bt instanceof AllocationSiteToken || bt instanceof PackageObjectToken)) {
-            // const a = p.solver.globalState;
+        if (isExpression(funarg)) { // TODO: SpreadElement? non-MemberExpression?
             const funVar = p.solver.varProducer.expVar(funarg, p.path);
-            // const caller = a.getEnclosingFunctionOrModule(p.path, p.moduleInfo);
             p.solver.addForAllTokensConstraint(funVar, key, {n: funarg, t: bt, s: kind}, (ft: Token) => {
                 if (!(ft instanceof FunctionToken || ft instanceof AccessPathToken))
                     return; // TODO: ignoring native functions etc.
@@ -368,7 +382,20 @@ export function invokeCallback(kind: CallbackKind, p: NativeFunctionParams, arg:
     }
 }
 
-export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams, bt: AllocationSiteToken | PackageObjectToken, ft: FunctionToken | AccessPathToken) {
+/**
+ * Models a call into a generator.
+ */
+export function generatorCall(p: NativeFunctionParams) {
+    if (p.base instanceof AllocationSiteToken && isFunction(p.base.allocSite)) {
+        const solver = p.solver;
+        const f = solver.fragmentState;
+        const a = solver.globalState;
+        const caller = a.getEnclosingFunctionOrModule(p.path, p.moduleInfo);
+        f.registerCallEdge(p.path.node, caller, a.functionInfos.get(p.base.allocSite)!, {native: true});
+    }
+}
+
+export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams, bt: ObjectPropertyVarObj | undefined, ft: FunctionToken | AccessPathToken) {
     const solver = p.solver;
     const f = solver.fragmentState;
     const vp = f.varProducer;
@@ -458,14 +485,15 @@ export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams,
                 // TODO: also change known entries
                 modelCall([btVar, btVar]);
             }
-            solver.addTokenConstraint(bt, pResultVar);
+            if (bt)
+                solver.addTokenConstraint(bt, pResultVar);
             break;
         case "Map.prototype.forEach":
-            if (bt.kind === "Map" && ft instanceof FunctionToken)
+            if (bt instanceof AllocationSiteToken && bt.kind === "Map" && ft instanceof FunctionToken)
                 modelCall([vp.objPropVar(bt, MAP_VALUES), vp.objPropVar(bt, MAP_KEYS), bt], arg1Var);
             break;
         case "Set.prototype.forEach":
-            if (bt.kind === "Set" && ft instanceof FunctionToken)
+            if (bt instanceof AllocationSiteToken && bt.kind === "Set" && ft instanceof FunctionToken)
                 // TODO: what if called via e.g. bind? (same for other baseVar constraints above)
                 modelCall([vp.objPropVar(bt, SET_VALUES), vp.objPropVar(bt, SET_VALUES), bt], arg1Var);
             break;
@@ -473,7 +501,7 @@ export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams,
         case "Promise.prototype.then$onRejected":
         case "Promise.prototype.catch$onRejected":
         case "Promise.prototype.finally$onFinally": {
-            if (bt.kind !== "Promise")
+            if (!(bt instanceof AllocationSiteToken) || bt.kind !== "Promise")
                 break;
             let prop, key;
             switch (kind) {
@@ -524,6 +552,13 @@ export function invokeCallbackBound(kind: CallbackKind, p: NativeFunctionParams,
             returnToken(thenPromise, p);
             break;
         }
+        case "queueMicrotask":
+        case "setImmediate": // TODO: pass arguments
+        case "setInterval": // TODO: pass arguments
+        case "setTimeout": // TODO: pass arguments
+            if (ft instanceof FunctionToken) // TODO: handle indirect calls to AccessPathToken
+                modelCall(kind !== "queueMicrotask" ? args.slice(2).map(arg => isExpression(arg) ? vp.expVar(arg, p.path) : undefined) : []);
+            break;
         default:
             kind satisfies never; // ensure that switch is exhaustive
     }
