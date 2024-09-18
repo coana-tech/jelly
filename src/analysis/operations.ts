@@ -15,6 +15,7 @@ import {
     isRestElement,
     isSpreadElement,
     isStringLiteral,
+    isSuper,
     isTSParameterProperty,
     isTypeCastExpression,
     JSXElement,
@@ -405,9 +406,16 @@ export class Operations {
         // constraint: ...: t_arguments ∈ ⟦t_arguments⟧ if the function uses 'arguments'
         if (argumentsToken)
             this.solver.addTokenConstraint(argumentsToken, vp.argumentsVar(t.fun));
-        // constraint: if non-'new', E0 is a member expression E.m and t uses 'this', then ⟦E⟧ ⊆ ⟦this_f⟧
-        if (!isNew && base)
-            addInclusionConstraint(base, vp.thisVar(t.fun));
+        // constraint: if non-'new', E0 is a member expression E.m, then ⟦E⟧ ⊆ ⟦this_f⟧
+        if (!isNew && base) {
+            // ...except if E is 'super'
+            if (isMemberExpression(path.node.callee) && isSuper(path.node.callee.object)) {
+                const fun = getEnclosingFunction(path);
+                if (fun)
+                    addInclusionConstraint(vp.thisVar(fun), vp.thisVar(t.fun));
+            } else
+                addInclusionConstraint(base, vp.thisVar(t.fun));
+        }
         // constraint: ...: ⟦ret_t⟧ ⊆ ⟦(new) E0(E1,...,En)⟧
         if (!isParentExpressionStatement(pars))
             this.solver.addSubsetConstraint(vp.returnVar(t.fun), resultVar);
@@ -502,16 +510,20 @@ export class Operations {
         if (base instanceof ArrayToken && prop === "length")
             return undefined;
         const dst = this.solver.varProducer.readResultVar(base, prop);
-        const basePropSpecial =
-            (base instanceof FunctionToken && STANDARD_METHODS.get("Function")!.has(prop)) ||
-            (base instanceof AllocationSiteToken && base.kind !== "Object" && STANDARD_METHODS.get(base.kind)?.has(prop));
-        // constraint: ... ∀ ancestors t2 of t: ...
-        this.solver.addForAllAncestorsConstraint(base, TokenListener.READ_ANCESTORS, {s: prop}, (t2: Token) => {
-            if (basePropSpecial && t2 === this.globalSpecialNatives.get(OBJECT_PROTOTYPE))
-                return; // safe to skip properties at Object.prototype that are in {base.kind}.prototype
-            if (isObjectPropertyVarObj(t2))
-                this.readPropertyBound(t2, prop, dst, {t: base, s: prop}, base);
-        });
+        if (base instanceof FunctionToken && prop === "prototype") // function objects always have 'prototype', no need to consult prototype chain
+            this.readPropertyBound(base, prop, dst, {t: base, s: prop}, base);
+        else {
+            const basePropSpecial =
+                (base instanceof FunctionToken && STANDARD_METHODS.get("Function")!.has(prop)) ||
+                (base instanceof AllocationSiteToken && base.kind !== "Object" && STANDARD_METHODS.get(base.kind)?.has(prop));
+            // constraint: ... ∀ ancestors t2 of t: ...
+            this.solver.addForAllAncestorsConstraint(base, TokenListener.READ_ANCESTORS, {s: prop}, (t2: Token) => {
+                if (basePropSpecial && t2 === this.globalSpecialNatives.get(OBJECT_PROTOTYPE))
+                    return; // safe to skip properties at Object.prototype that are in {base.kind}.prototype
+                if (isObjectPropertyVarObj(t2))
+                    this.readPropertyBound(t2, prop, dst, {t: base, s: prop}, base);
+            });
+        }
         return dst;
     }
 
@@ -758,7 +770,10 @@ export class Operations {
             }
 
         } else if (isMemberExpression(dst) || isOptionalMemberExpression(dst)) {
-            const lVar = this.expVar(dst.object, path);
+            const e = getEnclosingFunction(path);
+            const lVar = isSuper(dst.object) ? e ? this.solver.varProducer.thisVar(e) : undefined : this.expVar(dst.object, path);
+            if (!lVar)
+                return;
             const prop = getProperty(dst);
             const enclosing = this.a.getEnclosingFunctionOrModule(path, this.moduleInfo);
 
