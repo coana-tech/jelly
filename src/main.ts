@@ -465,19 +465,25 @@ async function main() {
       let typer: TypeScriptTypeInferrer | undefined;
       if (options.typescript) typer = new TypeScriptTypeInferrer(files);
 
-      const vr =
-        vulnerabilityDetector?.collectAllVulnerabilityResults(solver, typer) ??
-        {};
-      if (vr.matches) {
-        if (options.matchesFile) {
-          writeFileSync(
-            options.matchesFile,
-            JSON.stringify(transformMatches(vr.matches), null, 2)
-          );
-        }
+      if (options.matchesFile && vulnerabilityDetector) {
+        const matches = vulnerabilityDetector.patternMatch(
+          solver.fragmentState,
+          typer,
+          solver.diagnostics
+        );
+        writeFileSync(
+          options.matchesFile,
+          JSON.stringify(transformMatches(matches), null, 2)
+        );
       }
 
       if (options.callgraphHtml) {
+        // pattern matching currently happens twice when both options.matchesFile and options.callgraphHtml are used
+        const vr =
+          vulnerabilityDetector?.collectAllVulnerabilityResults(
+            solver,
+            typer
+          ) ?? {};
         const file = options.callgraphHtml;
         exportCallGraphHtml(f, file, vr);
         logger.info(`Call graph written to ${file}`);
